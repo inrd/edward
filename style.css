@@ -1,0 +1,54 @@
+@import "node_modules/ol/ol.css";
+
+html, body {
+  margin: 0;
+  height: 100%;
+}
+#map {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+}
+
+.map-controls {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.map-instructions {
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  font: 14px/1.4 sans-serif;
+}
+
+.map-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.map-button {
+  appearance: none;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  padding: 9px 12px;
+  font: 14px/1.2 sans-serif;
+  cursor: pointer;
+}
+
+.map-button:hover {
+  background: #ffffff;
+}
+
+.map-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
