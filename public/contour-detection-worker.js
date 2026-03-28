@@ -8,6 +8,11 @@ let settings = {
 
 let model;
 let anchorPoint;
+const NEIGHBOR_STEPS = [
+  [-1, -1, Math.SQRT2], [0, -1, 1], [1, -1, Math.SQRT2],
+  [-1, 0, 1],                           [1, 0, 1],
+  [-1, 1, Math.SQRT2],  [0, 1, 1],  [1, 1, Math.SQRT2]
+];
 
 function postSuccess(id, result = {}) {
   self.postMessage({id, ok: true, result});
@@ -98,16 +103,97 @@ function heuristic(a, b) {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
 
-function distanceFromLine(point, start, end) {
+function buildLineDistanceEvaluator(start, end) {
   const dx = end[0] - start[0];
   const dy = end[1] - start[1];
+
   if (dx === 0 && dy === 0) {
-    return heuristic(point, start);
+    return (x, y) => Math.hypot(x - start[0], y - start[1]);
   }
 
-  const numerator = Math.abs(dy * point[0] - dx * point[1] + end[0] * start[1] - end[1] * start[0]);
-  const denominator = Math.hypot(dx, dy);
-  return numerator / denominator;
+  const intercept = end[0] * start[1] - end[1] * start[0];
+  const inverseDenominator = 1 / Math.hypot(dx, dy);
+
+  return (x, y) => Math.abs(dy * x - dx * y + intercept) * inverseDenominator;
+}
+
+function createMinHeap() {
+  const nodes = [];
+
+  function bubbleUp(index) {
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (nodes[parent].score <= nodes[index].score) {
+        break;
+      }
+
+      [nodes[parent], nodes[index]] = [nodes[index], nodes[parent]];
+      index = parent;
+    }
+  }
+
+  function bubbleDown(index) {
+    while (true) {
+      const left = index * 2 + 1;
+      const right = left + 1;
+      let smallest = index;
+
+      if (left < nodes.length && nodes[left].score < nodes[smallest].score) {
+        smallest = left;
+      }
+
+      if (right < nodes.length && nodes[right].score < nodes[smallest].score) {
+        smallest = right;
+      }
+
+      if (smallest === index) {
+        break;
+      }
+
+      [nodes[index], nodes[smallest]] = [nodes[smallest], nodes[index]];
+      index = smallest;
+    }
+  }
+
+  return {
+    get size() {
+      return nodes.length;
+    },
+    push(node) {
+      nodes.push(node);
+      bubbleUp(nodes.length - 1);
+    },
+    pop() {
+      if (nodes.length === 0) {
+        return undefined;
+      }
+
+      const top = nodes[0];
+      const tail = nodes.pop();
+      if (nodes.length > 0 && tail) {
+        nodes[0] = tail;
+        bubbleDown(0);
+      }
+
+      return top;
+    }
+  };
+}
+
+function reconstructPath(parent, goalIndex) {
+  const path = [];
+  const width = model.gridWidth;
+  let index = goalIndex;
+
+  while (index !== -1) {
+    const x = index % width;
+    const y = Math.floor(index / width);
+    path.push(gridToPixel([x, y]));
+    index = parent[index];
+  }
+
+  path.reverse();
+  return path;
 }
 
 function buildSearchBounds(start, end) {
@@ -121,20 +207,6 @@ function buildSearchBounds(start, end) {
   };
 }
 
-function reconstructPath(cameFrom, currentKey) {
-  const path = [];
-  let key = currentKey;
-
-  while (key !== undefined) {
-    const point = cameFrom.points.get(key);
-    path.push(gridToPixel(point));
-    key = cameFrom.parents.get(key);
-  }
-
-  path.reverse();
-  return path;
-}
-
 function findContourPath(targetPixel) {
   if (!model || !anchorPoint) {
     throw new Error('Contour model is not ready.');
@@ -143,52 +215,49 @@ function findContourPath(targetPixel) {
   const start = pixelToGrid(anchorPoint);
   const goal = pixelToGrid(targetPixel);
   const bounds = buildSearchBounds(start, goal);
-  const open = [start];
-  const queued = new Set([`${start[0]},${start[1]}`]);
-  const scores = new Map([[`${start[0]},${start[1]}`, 0]]);
-  const estimate = new Map([[`${start[0]},${start[1]}`, heuristic(start, goal)]]);
-  const cameFrom = {
-    parents: new Map(),
-    points: new Map([[`${start[0]},${start[1]}`, start]])
-  };
-  const neighbors = [
-    [-1, -1], [0, -1], [1, -1],
-    [-1, 0],           [1, 0],
-    [-1, 1],  [0, 1],  [1, 1]
-  ];
+  const gridWidth = model.gridWidth;
+  const gridSize = gridWidth * model.gridHeight;
+  const startIndex = start[1] * gridWidth + start[0];
+  const goalIndex = goal[1] * gridWidth + goal[0];
+  const heap = createMinHeap();
+  const scores = new Float32Array(gridSize);
+  const parent = new Int32Array(gridSize);
+  const closed = new Uint8Array(gridSize);
+  const distanceFromPathLine = buildLineDistanceEvaluator(start, goal);
   const iterationLimit = Math.max(6000, (bounds.maxX - bounds.minX + 1) * (bounds.maxY - bounds.minY + 1) * 2);
   let iterations = 0;
 
-  while (open.length > 0 && iterations < iterationLimit) {
+  scores.fill(Number.POSITIVE_INFINITY);
+  parent.fill(-1);
+  scores[startIndex] = 0;
+  heap.push({index: startIndex, score: heuristic(start, goal)});
+
+  while (heap.size > 0 && iterations < iterationLimit) {
     iterations += 1;
 
-    let bestIndex = 0;
-    let bestKey = `${open[0][0]},${open[0][1]}`;
-    let bestScore = estimate.get(bestKey) ?? Number.POSITIVE_INFINITY;
-
-    for (let index = 1; index < open.length; index += 1) {
-      const candidate = open[index];
-      const candidateKey = `${candidate[0]},${candidate[1]}`;
-      const candidateScore = estimate.get(candidateKey) ?? Number.POSITIVE_INFINITY;
-      if (candidateScore < bestScore) {
-        bestIndex = index;
-        bestKey = candidateKey;
-        bestScore = candidateScore;
-      }
+    const currentNode = heap.pop();
+    if (!currentNode) {
+      break;
     }
 
-    const current = open.splice(bestIndex, 1)[0];
-    queued.delete(bestKey);
-
-    if (current[0] === goal[0] && current[1] === goal[1]) {
-      return reconstructPath(cameFrom, bestKey);
+    const currentIndex = currentNode.index;
+    if (closed[currentIndex]) {
+      continue;
     }
 
-    const currentScore = scores.get(bestKey) ?? Number.POSITIVE_INFINITY;
+    if (currentIndex === goalIndex) {
+      return reconstructPath(parent, currentIndex);
+    }
 
-    for (const [dx, dy] of neighbors) {
-      const nextX = current[0] + dx;
-      const nextY = current[1] + dy;
+    closed[currentIndex] = 1;
+
+    const currentX = currentIndex % gridWidth;
+    const currentY = Math.floor(currentIndex / gridWidth);
+    const currentScore = scores[currentIndex];
+
+    for (const [dx, dy, movementCost] of NEIGHBOR_STEPS) {
+      const nextX = currentX + dx;
+      const nextY = currentY + dy;
 
       if (
         nextX < bounds.minX || nextX > bounds.maxX ||
@@ -197,27 +266,26 @@ function findContourPath(targetPixel) {
         continue;
       }
 
-      const next = [nextX, nextY];
-      const nextKey = `${nextX},${nextY}`;
-      const edgeStrength = gradientAt(nextX, nextY);
-      const movementCost = Math.hypot(dx, dy);
-      const edgeCost = (1 - edgeStrength) * settings.edgeBias;
-      const lineCost = distanceFromLine(next, start, goal) * settings.lineBias * 0.08;
-      const tentativeScore = currentScore + movementCost + edgeCost + lineCost;
-
-      if (tentativeScore >= (scores.get(nextKey) ?? Number.POSITIVE_INFINITY)) {
+      const nextIndex = nextY * gridWidth + nextX;
+      if (closed[nextIndex]) {
         continue;
       }
 
-      cameFrom.parents.set(nextKey, bestKey);
-      cameFrom.points.set(nextKey, next);
-      scores.set(nextKey, tentativeScore);
-      estimate.set(nextKey, tentativeScore + heuristic(next, goal));
+      const edgeStrength = gradientAt(nextX, nextY);
+      const edgeCost = (1 - edgeStrength) * settings.edgeBias;
+      const lineCost = distanceFromPathLine(nextX, nextY) * settings.lineBias * 0.08;
+      const tentativeScore = currentScore + movementCost + edgeCost + lineCost;
 
-      if (!queued.has(nextKey)) {
-        open.push(next);
-        queued.add(nextKey);
+      if (tentativeScore >= scores[nextIndex]) {
+        continue;
       }
+
+      parent[nextIndex] = currentIndex;
+      scores[nextIndex] = tentativeScore;
+      heap.push({
+        index: nextIndex,
+        score: tentativeScore + Math.hypot(nextX - goal[0], nextY - goal[1])
+      });
     }
   }
 
