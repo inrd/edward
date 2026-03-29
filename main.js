@@ -31,14 +31,6 @@ instructions.className = 'map-instructions';
 const actions = document.createElement('div');
 actions.className = 'map-actions';
 
-const undoButton = document.createElement('button');
-undoButton.type = 'button';
-undoButton.className = 'map-button';
-undoButton.textContent = 'Undo last point';
-undoButton.addEventListener('click', async () => {
-  await basicPathPlugin.undoLastPoint();
-});
-
 const clearButton = document.createElement('button');
 clearButton.type = 'button';
 clearButton.className = 'map-button';
@@ -49,12 +41,11 @@ clearButton.addEventListener('click', () => {
 
 function updateControls(state) {
   instructions.textContent = state.status;
-  undoButton.disabled = state.busy || state.pointCount === 0;
   clearButton.disabled = state.busy || !state.hasPath;
 }
 
 basicPathPlugin.subscribe(updateControls);
 
-actions.append(undoButton, clearButton);
+actions.append(clearButton);
 controls.append(instructions, actions);
 document.body.append(controls);

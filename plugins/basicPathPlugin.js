@@ -1,6 +1,7 @@
 import Feature from 'ol/Feature';
 import LineString from 'ol/geom/LineString';
 import Point from 'ol/geom/Point';
+import Modify from 'ol/interaction/Modify.js';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
 import {unByKey} from 'ol/Observable';
@@ -26,6 +27,19 @@ function mergeSegments(segments, liveSegment = []) {
   }
 
   return merged;
+}
+
+function distanceToSegment(pixel, a, b) {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+
+  if (dx === 0 && dy === 0) {
+    return Math.hypot(pixel[0] - a[0], pixel[1] - a[1]);
+  }
+
+  const t = Math.max(0, Math.min(1, ((pixel[0] - a[0]) * dx + (pixel[1] - a[1]) * dy) / (dx * dx + dy * dy)));
+  const projection = [a[0] + t * dx, a[1] + t * dy];
+  return Math.hypot(pixel[0] - projection[0], pixel[1] - projection[1]);
 }
 
 function createSnapshotCanvas(map) {
@@ -79,22 +93,24 @@ function imageDataToTransferableSnapshot(imageData) {
 export function createBasicPathPlugin(options = {}) {
   const strokeColor = options.color ?? '#ff5a36';
   const pathFeature = new Feature({geometry: new LineString([])});
-  const source = new VectorSource({features: [pathFeature]});
+  const pathSource = new VectorSource({features: [pathFeature]});
+  const anchorSource = new VectorSource();
   const anchorFeatures = [];
   const listeners = new Set();
 
   const pathLayer = new VectorLayer({
-    source,
-    style(feature) {
-      if (feature === pathFeature) {
-        return new Style({
-          stroke: new Stroke({
-            color: strokeColor,
-            width: options.width ?? 4
-          })
-        });
-      }
+    source: pathSource,
+    style: new Style({
+      stroke: new Stroke({
+        color: strokeColor,
+        width: options.width ?? 4
+      })
+    })
+  });
 
+  const anchorLayer = new VectorLayer({
+    source: anchorSource,
+    style(feature) {
       const isStart = feature.get('role') === 'start';
       return new Style({
         image: new CircleStyle({
@@ -115,6 +131,7 @@ export function createBasicPathPlugin(options = {}) {
   let clickKey;
   let moveKey;
   let moveEndKey;
+  let modifyInteraction;
   let worker;
   let workerReady = false;
   let requestId = 0;
@@ -156,14 +173,14 @@ export function createBasicPathPlugin(options = {}) {
   }
 
   function syncAnchorFeatures() {
-    anchorFeatures.forEach((feature) => source.removeFeature(feature));
+    anchorFeatures.forEach((feature) => anchorSource.removeFeature(feature));
     anchorFeatures.length = 0;
 
     anchors.forEach((coordinate, index) => {
       const feature = new Feature({geometry: new Point(coordinate)});
       feature.set('role', index === 0 ? 'start' : 'anchor');
       anchorFeatures.push(feature);
-      source.addFeature(feature);
+      anchorSource.addFeature(feature);
     });
   }
 
@@ -171,6 +188,100 @@ export function createBasicPathPlugin(options = {}) {
     pathFeature.getGeometry().setCoordinates(mergeSegments(segments, liveSegment));
     syncAnchorFeatures();
     notify();
+  }
+
+  function getAnchorPixels() {
+    if (!map) {
+      return [];
+    }
+
+    return anchors.map((coordinate) => map.getPixelFromCoordinate(coordinate)).filter(Boolean);
+  }
+
+  async function buildSegmentBetweenPixels(startPixel, endPixel) {
+    await callWorker('buildMap', {
+      x: Math.round(startPixel[0]),
+      y: Math.round(startPixel[1])
+    });
+
+    const contourPixels = await getContourPixels(endPixel);
+    const contourCoordinates = pixelsToCoordinates(contourPixels);
+
+    if (contourCoordinates.length >= 2) {
+      return contourCoordinates;
+    }
+
+    const startCoordinate = map?.getCoordinateFromPixel(startPixel);
+    const endCoordinate = map?.getCoordinateFromPixel(endPixel);
+    return startCoordinate && endCoordinate ? [startCoordinate, endCoordinate] : [];
+  }
+
+  async function rebuildSegmentsFromAnchors(nextStatus) {
+    if (!map) {
+      return false;
+    }
+
+    anchorPixels = getAnchorPixels();
+    liveSegment = [];
+    resetPreviewState();
+
+    if (anchors.length <= 1) {
+      segments = [];
+      syncPathGeometry();
+      setStatus(nextStatus, false);
+      return true;
+    }
+
+    await analyzeCurrentView();
+
+    const nextSegments = [];
+    const segmentCount = closed ? anchors.length : anchors.length - 1;
+
+    for (let index = 0; index < segmentCount; index += 1) {
+      const startPixel = anchorPixels[index];
+      const endPixel = anchorPixels[(index + 1) % anchors.length];
+      if (!startPixel || !endPixel) {
+        continue;
+      }
+
+      nextSegments.push(await buildSegmentBetweenPixels(startPixel, endPixel));
+    }
+
+    segments = nextSegments;
+    anchorPixels = getAnchorPixels();
+
+    if (!closed && anchors.length > 0) {
+      await rebuildMapFromLastAnchor();
+    }
+
+    syncPathGeometry();
+    setStatus(nextStatus, false);
+    return true;
+  }
+
+  function getNearestClosedSegmentIndex(pixel) {
+    if (!map || !closed || segments.length === 0) {
+      return -1;
+    }
+
+    let bestIndex = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    segments.forEach((segment, index) => {
+      const segmentPixels = segment
+        .map((coordinate) => map.getPixelFromCoordinate(coordinate))
+        .filter(Boolean);
+
+      for (let pointIndex = 1; pointIndex < segmentPixels.length; pointIndex += 1) {
+        const distance = distanceToSegment(pixel, segmentPixels[pointIndex - 1], segmentPixels[pointIndex]);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestIndex = index;
+        }
+      }
+    });
+
+    return bestDistance <= 14 ? bestIndex : -1;
   }
 
   function createWorkerIfNeeded() {
@@ -413,7 +524,7 @@ export function createBasicPathPlugin(options = {}) {
 
     if (targetPixel === anchorPixels[0]) {
       closed = true;
-      setStatus('Path closed. Undo the last point or clear it to keep editing.', false);
+      setStatus('Path closed. Drag nodes to move them, or Shift-click the path to insert a new one.', false);
       syncPathGeometry();
       return true;
     }
@@ -444,7 +555,12 @@ export function createBasicPathPlugin(options = {}) {
     }
 
     if (closed) {
-      setStatus('The path is closed. Undo the last point or clear it before adding more anchors.', false);
+      if (event.originalEvent?.shiftKey) {
+        await handleClosedPathInsert(event);
+        return;
+      }
+
+      setStatus('Path closed. Drag nodes to move them, or Shift-click the path to insert a new one.', false);
       return;
     }
 
@@ -469,6 +585,64 @@ export function createBasicPathPlugin(options = {}) {
 
     previewPixel = getSnapTargetPixel(event.pixel);
     void runPreviewLoop();
+  }
+
+  async function handleClosedPathInsert(event) {
+    if (!map || busy || !closed) {
+      return;
+    }
+
+    const clickedPath = map.forEachFeatureAtPixel(
+      event.pixel,
+      (feature) => feature,
+      {
+        layerFilter: (layer) => layer === pathLayer,
+        hitTolerance: 8
+      }
+    );
+
+    if (clickedPath !== pathFeature) {
+      return;
+    }
+
+    const insertionIndex = getNearestClosedSegmentIndex(event.pixel);
+    if (insertionIndex < 0) {
+      return;
+    }
+
+    const coordinate = map.getCoordinateFromPixel(event.pixel);
+    if (!coordinate) {
+      return;
+    }
+
+    event.preventDefault();
+    anchors.splice(insertionIndex + 1, 0, coordinate);
+    syncAnchorFeatures();
+
+    try {
+      setStatus('Inserting a new node into the closed path...', true);
+      await rebuildSegmentsFromAnchors('Node inserted. Drag nodes to continue editing the closed path.');
+    } catch (error) {
+      console.error('Closed-path insertion failed:', error);
+      setStatus(`Inserting the node failed: ${error.message}`, false);
+    }
+  }
+
+  async function handleAnchorModifyEnd() {
+    if (!closed || !map) {
+      return;
+    }
+
+    anchors = anchorFeatures.map((feature) => feature.getGeometry().getCoordinates());
+
+    try {
+      setStatus('Rebuilding the closed path after moving a node...', true);
+      await rebuildSegmentsFromAnchors('Path updated. Drag nodes or Shift-click the path to keep editing.');
+    } catch (error) {
+      console.error('Closed-path edit failed:', error);
+      setStatus(`Updating the path failed: ${error.message}`, false);
+      syncAnchorFeatures();
+    }
   }
 
   function clearState() {
@@ -509,51 +683,6 @@ export function createBasicPathPlugin(options = {}) {
       setStatus('Closing the path along the detected contour...', true);
       return lockSegment(anchorPixels[0]);
     },
-    async openPath() {
-      if (!closed) {
-        return false;
-      }
-
-      segments = segments.slice(0, -1);
-      closed = false;
-      liveSegment = [];
-      resetPreviewState();
-      await refreshMagneticModel();
-      setStatus('Path reopened. Move the pointer to keep tracing.', false);
-      syncPathGeometry();
-      return true;
-    },
-    async toggleClosed() {
-      if (closed) {
-        return this.openPath();
-      }
-
-      return this.closePath();
-    },
-    async undoLastPoint() {
-      if (closed) {
-        return this.openPath();
-      }
-
-      if (anchors.length === 0) {
-        return false;
-      }
-
-      if (anchors.length === 1) {
-        clearState();
-        return true;
-      }
-
-      anchors = anchors.slice(0, -1);
-      anchorPixels = anchorPixels.slice(0, -1);
-      segments = segments.slice(0, -1);
-      liveSegment = [];
-      resetPreviewState();
-      await rebuildMapFromLastAnchor();
-      setStatus('Last anchor removed.', false);
-      syncPathGeometry();
-      return true;
-    },
     clearPoints() {
       clearState();
     },
@@ -566,6 +695,17 @@ export function createBasicPathPlugin(options = {}) {
       moveEndKey = map.on('moveend', () => {
         void refreshMagneticModel();
       });
+      modifyInteraction = new Modify({
+        source: anchorSource,
+        condition: () => closed && !busy
+      });
+      modifyInteraction.on('modifystart', () => {
+        setStatus('Dragging a node. Release to rebuild the closed path.', false);
+      });
+      modifyInteraction.on('modifyend', () => {
+        void handleAnchorModifyEnd();
+      });
+      map.addInteraction(modifyInteraction);
     },
     enableVertexEditing() {
       return null;
@@ -573,6 +713,7 @@ export function createBasicPathPlugin(options = {}) {
     apply(targetMap) {
       map = targetMap;
       map.addLayer(pathLayer);
+      map.addLayer(anchorLayer);
       return pathLayer;
     },
     destroy() {
@@ -581,6 +722,9 @@ export function createBasicPathPlugin(options = {}) {
       unByKey(clickKey);
       unByKey(moveKey);
       unByKey(moveEndKey);
+      if (map && modifyInteraction) {
+        map.removeInteraction(modifyInteraction);
+      }
       pendingRequests.forEach(({reject}) => reject(new Error('Plugin destroyed.')));
       pendingRequests.clear();
       worker?.terminate();
