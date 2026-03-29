@@ -3,7 +3,9 @@ let settings = {
   searchPadding: 52,
   maxSearchPadding: 136,
   edgeBias: 8,
-  lineBias: 1.35
+  lineBias: 1.35,
+  turnBias: 1.1,
+  continuityBias: 1.35
 };
 
 let model;
@@ -117,6 +119,53 @@ function buildLineDistanceEvaluator(start, end) {
   return (x, y) => Math.abs(dy * x - dx * y + intercept) * inverseDenominator;
 }
 
+function getTurnCost(parentIndex, currentX, currentY, nextX, nextY, gridWidth) {
+  if (parentIndex === -1) {
+    return 0;
+  }
+
+  const parentX = parentIndex % gridWidth;
+  const parentY = Math.floor(parentIndex / gridWidth);
+  const previousDx = currentX - parentX;
+  const previousDy = currentY - parentY;
+  const nextDx = nextX - currentX;
+  const nextDy = nextY - currentY;
+  const previousLength = Math.hypot(previousDx, previousDy);
+  const nextLength = Math.hypot(nextDx, nextDy);
+
+  if (previousLength === 0 || nextLength === 0) {
+    return 0;
+  }
+
+  const cosine = clamp(
+    (previousDx * nextDx + previousDy * nextDy) / (previousLength * nextLength),
+    -1,
+    1
+  );
+
+  return (1 - cosine) * settings.turnBias;
+}
+
+function getDirectionCost(direction, expectedDirection) {
+  if (!expectedDirection) {
+    return 0;
+  }
+
+  const length = Math.hypot(direction[0], direction[1]);
+  const expectedLength = Math.hypot(expectedDirection[0], expectedDirection[1]);
+  if (length === 0 || expectedLength === 0) {
+    return 0;
+  }
+
+  const cosine = clamp(
+    (direction[0] * expectedDirection[0] + direction[1] * expectedDirection[1]) / (length * expectedLength),
+    -1,
+    1
+  );
+
+  return (1 - cosine) * settings.continuityBias;
+}
+
 function createMinHeap() {
   const nodes = [];
 
@@ -188,11 +237,60 @@ function reconstructPath(parent, goalIndex) {
   while (index !== -1) {
     const x = index % width;
     const y = Math.floor(index / width);
-    path.push(gridToPixel([x, y]));
+    path.push([x, y]);
     index = parent[index];
   }
 
   path.reverse();
+  return path;
+}
+
+function simplifyPath(points) {
+  let nextPoints = points;
+  let changed = nextPoints.length >= 3;
+
+  while (changed && nextPoints.length >= 3) {
+    changed = false;
+    const simplified = [nextPoints[0]];
+
+    for (let index = 1; index < nextPoints.length - 1; index += 1) {
+      const previous = simplified[simplified.length - 1];
+      const current = nextPoints[index];
+      const next = nextPoints[index + 1];
+      const inDx = current[0] - previous[0];
+      const inDy = current[1] - previous[1];
+      const outDx = next[0] - current[0];
+      const outDy = next[1] - current[1];
+      const inLength = Math.hypot(inDx, inDy);
+      const outLength = Math.hypot(outDx, outDy);
+
+      if (inLength === 0 || outLength === 0) {
+        changed = true;
+        continue;
+      }
+
+      const cosine = clamp((inDx * outDx + inDy * outDy) / (inLength * outLength), -1, 1);
+      const shortcutLength = Math.hypot(next[0] - previous[0], next[1] - previous[1]);
+      const detourCost = inLength + outLength - shortcutLength;
+      const localGradient = gradientAt(current[0], current[1]);
+
+      if (cosine < 0.6 && detourCost < 1.6 && localGradient < 0.4) {
+        changed = true;
+        continue;
+      }
+
+      simplified.push(current);
+    }
+
+    simplified.push(nextPoints[nextPoints.length - 1]);
+    nextPoints = simplified;
+  }
+
+  const path = [];
+  for (const point of nextPoints) {
+    path.push(gridToPixel(point));
+  }
+
   return path;
 }
 
@@ -207,7 +305,7 @@ function buildSearchBounds(start, end) {
   };
 }
 
-function findContourPath(targetPixel) {
+function findContourPath(targetPixel, continuity = {}) {
   if (!model || !anchorPoint) {
     throw new Error('Contour model is not ready.');
   }
@@ -246,7 +344,7 @@ function findContourPath(targetPixel) {
     }
 
     if (currentIndex === goalIndex) {
-      return reconstructPath(parent, currentIndex);
+      return simplifyPath(reconstructPath(parent, currentIndex));
     }
 
     closed[currentIndex] = 1;
@@ -274,7 +372,16 @@ function findContourPath(targetPixel) {
       const edgeStrength = gradientAt(nextX, nextY);
       const edgeCost = (1 - edgeStrength) * settings.edgeBias;
       const lineCost = distanceFromPathLine(nextX, nextY) * settings.lineBias * 0.08;
-      const tentativeScore = currentScore + movementCost + edgeCost + lineCost;
+      const turnCost = getTurnCost(parent[currentIndex], currentX, currentY, nextX, nextY, gridWidth);
+      const stepDirection = [nextX - currentX, nextY - currentY];
+      const startContinuityCost = currentIndex === startIndex
+        ? getDirectionCost(stepDirection, continuity.startDirection)
+        : 0;
+      const endContinuityCost = nextIndex === goalIndex
+        ? getDirectionCost(stepDirection, continuity.endDirection)
+        : 0;
+      const tentativeScore =
+        currentScore + movementCost + edgeCost + lineCost + turnCost + startContinuityCost + endContinuityCost;
 
       if (tentativeScore >= scores[nextIndex]) {
         continue;
@@ -320,7 +427,7 @@ self.addEventListener('message', (event) => {
     }
 
     if (type === 'getContour') {
-      const points = findContourPath([payload.x, payload.y]);
+      const points = findContourPath([payload.x, payload.y], payload.continuity);
       postSuccess(id, {points});
       return;
     }

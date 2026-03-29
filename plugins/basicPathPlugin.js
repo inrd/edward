@@ -216,13 +216,54 @@ export function createBasicPathPlugin(options = {}) {
     return anchors.map((coordinate) => map.getPixelFromCoordinate(coordinate)).filter(Boolean);
   }
 
-  async function buildSegmentBetweenPixels(startPixel, endPixel) {
+  function getSegmentDirectionAt(segment, side) {
+    if (!segment || segment.length < 2) {
+      return null;
+    }
+
+    if (side === 'start') {
+      const [a, b] = segment;
+      return [b[0] - a[0], b[1] - a[1]];
+    }
+
+    const a = segment[segment.length - 2];
+    const b = segment[segment.length - 1];
+    return [b[0] - a[0], b[1] - a[1]];
+  }
+
+  function getContinuityHints(segmentIndex, segmentList = segments, affectedIndexes = new Set()) {
+    if (!closed || anchors.length < 3) {
+      return undefined;
+    }
+
+    const previousIndex = (segmentIndex - 1 + anchors.length) % anchors.length;
+    const nextIndex = (segmentIndex + 1) % anchors.length;
+    const continuity = {};
+
+    if (!affectedIndexes.has(previousIndex)) {
+      const previousDirection = getSegmentDirectionAt(segmentList[previousIndex], 'end');
+      if (previousDirection) {
+        continuity.startDirection = previousDirection;
+      }
+    }
+
+    if (!affectedIndexes.has(nextIndex)) {
+      const nextDirection = getSegmentDirectionAt(segmentList[nextIndex], 'start');
+      if (nextDirection) {
+        continuity.endDirection = nextDirection;
+      }
+    }
+
+    return continuity.startDirection || continuity.endDirection ? continuity : undefined;
+  }
+
+  async function buildSegmentBetweenPixels(startPixel, endPixel, continuity) {
     await callWorker('buildMap', {
       x: Math.round(startPixel[0]),
       y: Math.round(startPixel[1])
     });
 
-    const contourPixels = await getContourPixels(endPixel);
+    const contourPixels = await getContourPixels(endPixel, continuity);
     const contourCoordinates = pixelsToCoordinates(contourPixels);
 
     if (contourCoordinates.length >= 2) {
@@ -277,7 +318,7 @@ export function createBasicPathPlugin(options = {}) {
     return true;
   }
 
-  async function rebuildClosedSegmentAt(index) {
+  async function rebuildClosedSegmentAt(index, segmentList = segments, affectedIndexes = new Set()) {
     if (!closed || !map || anchors.length < 3) {
       return false;
     }
@@ -290,7 +331,11 @@ export function createBasicPathPlugin(options = {}) {
       return false;
     }
 
-    segments[index] = await buildSegmentBetweenPixels(startPixel, endPixel);
+    segmentList[index] = await buildSegmentBetweenPixels(
+      startPixel,
+      endPixel,
+      getContinuityHints(index, segmentList, affectedIndexes)
+    );
     return true;
   }
 
@@ -321,7 +366,11 @@ export function createBasicPathPlugin(options = {}) {
         continue;
       }
 
-      nextSegments[segmentIndex] = await buildSegmentBetweenPixels(startPixel, endPixel);
+      nextSegments[segmentIndex] = await buildSegmentBetweenPixels(
+        startPixel,
+        endPixel,
+        getContinuityHints(segmentIndex, nextSegments, new Set(getAdjacentSegmentIndexes(modifiedAnchorIndexes)))
+      );
       if (token !== dragPreviewToken) {
         return false;
       }
@@ -524,7 +573,9 @@ export function createBasicPathPlugin(options = {}) {
         searchPadding: options.searchPadding ?? 52,
         maxSearchPadding: options.maxSearchPadding ?? 136,
         edgeBias: options.edgeBias ?? 8,
-        lineBias: options.lineBias ?? 1.35
+        lineBias: options.lineBias ?? 1.35,
+        turnBias: options.turnBias ?? 1.1,
+        continuityBias: options.continuityBias ?? 1.35
       }
     });
     workerReady = true;
@@ -572,10 +623,11 @@ export function createBasicPathPlugin(options = {}) {
     });
   }
 
-  async function getContourPixels(targetPixel) {
+  async function getContourPixels(targetPixel, continuity) {
     const result = await callWorker('getContour', {
       x: Math.round(targetPixel[0]),
-      y: Math.round(targetPixel[1])
+      y: Math.round(targetPixel[1]),
+      continuity
     });
 
     return result.points ?? [];
@@ -829,8 +881,9 @@ export function createBasicPathPlugin(options = {}) {
       anchorPixels = getAnchorPixels();
 
       const segmentIndexes = getAdjacentSegmentIndexes(modifiedAnchorIndexes);
+      const affectedIndexes = new Set(segmentIndexes);
       for (const segmentIndex of segmentIndexes) {
-        await rebuildClosedSegmentAt(segmentIndex);
+        await rebuildClosedSegmentAt(segmentIndex, segments, affectedIndexes);
       }
 
       syncPathGeometry();
