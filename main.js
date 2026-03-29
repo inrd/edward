@@ -31,21 +31,32 @@ instructions.className = 'map-instructions';
 const actions = document.createElement('div');
 actions.className = 'map-actions';
 
+const toggleButton = document.createElement('button');
+toggleButton.type = 'button';
+toggleButton.className = 'map-button';
+toggleButton.addEventListener('click', () => {
+  basicPathPlugin.setEnabled(!basicPathPlugin.isEnabled());
+});
+
 const clearButton = document.createElement('button');
 clearButton.type = 'button';
 clearButton.className = 'map-button';
-clearButton.textContent = 'Clear path';
 clearButton.addEventListener('click', () => {
   basicPathPlugin.clearPoints();
 });
 
 function updateControls(state) {
   instructions.textContent = state.status;
-  clearButton.disabled = state.busy || !state.hasPath;
+  toggleButton.textContent = state.enabled ? 'Finish smart draw' : 'Start smart draw';
+  toggleButton.classList.toggle('is-active', state.enabled);
+  toggleButton.disabled = state.busy;
+
+  clearButton.textContent = state.pointCount > 0 ? 'Discard current path' : 'Undo last path';
+  clearButton.disabled = state.busy || !state.canUndo;
 }
 
 basicPathPlugin.subscribe(updateControls);
 
-actions.append(clearButton);
+actions.append(toggleButton, clearButton);
 controls.append(instructions, actions);
 document.body.append(controls);

@@ -48,6 +48,12 @@ html, body {
   background: #ffffff;
 }
 
+.map-button.is-active {
+  border-color: rgba(185, 68, 33, 0.55);
+  background: #ffebe4;
+  color: #7a2c14;
+}
+
 .map-button:disabled {
   opacity: 0.55;
   cursor: default;

@@ -1,6 +1,8 @@
 import Feature from 'ol/Feature';
 import LineString from 'ol/geom/LineString';
+import MultiPolygon from 'ol/geom/MultiPolygon';
 import Point from 'ol/geom/Point';
+import Polygon from 'ol/geom/Polygon';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
 import {unByKey} from 'ol/Observable';
@@ -26,6 +28,26 @@ function mergeSegments(segments, liveSegment = []) {
   }
 
   return merged;
+}
+
+function coordinatesEqual(a, b) {
+  return Boolean(a && b && a[0] === b[0] && a[1] === b[1]);
+}
+
+function createClosedRing(coordinates) {
+  if (coordinates.length < 3) {
+    return null;
+  }
+
+  const ring = [...coordinates];
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+
+  if (!coordinatesEqual(first, last)) {
+    ring.push(first);
+  }
+
+  return ring.length >= 4 ? ring : null;
 }
 
 function createSnapshotCanvas(map) {
@@ -78,19 +100,46 @@ function imageDataToTransferableSnapshot(imageData) {
 
 export function createBasicPathPlugin(options = {}) {
   const strokeColor = options.color ?? '#ff5a36';
+  const fillColor = options.fillColor ?? 'rgba(255, 90, 54, 0.18)';
+  const committedFillColor = options.committedFillColor ?? 'rgba(255, 90, 54, 0.22)';
+
   const pathFeature = new Feature({geometry: new LineString([])});
   const pathSource = new VectorSource({features: [pathFeature]});
   const anchorSource = new VectorSource();
+  const sessionPolygonSource = new VectorSource();
+  const outputSource = new VectorSource();
   const anchorFeatures = [];
+  const sessionPolygonFeatures = [];
   const listeners = new Set();
+
+  const sketchStroke = new Stroke({
+    color: strokeColor,
+    width: options.width ?? 4
+  });
 
   const pathLayer = new VectorLayer({
     source: pathSource,
     style: new Style({
+      stroke: sketchStroke
+    })
+  });
+
+  const sessionPolygonLayer = new VectorLayer({
+    source: sessionPolygonSource,
+    style: new Style({
+      stroke: sketchStroke,
+      fill: new Fill({color: fillColor})
+    })
+  });
+
+  const outputLayer = new VectorLayer({
+    source: outputSource,
+    style: new Style({
       stroke: new Stroke({
         color: strokeColor,
-        width: options.width ?? 4
-      })
+        width: options.width ?? 3
+      }),
+      fill: new Fill({color: committedFillColor})
     })
   });
 
@@ -122,26 +171,37 @@ export function createBasicPathPlugin(options = {}) {
   let requestId = 0;
   const pendingRequests = new Map();
 
+  let enabled = false;
   let anchors = [];
   let anchorPixels = [];
   let segments = [];
   let liveSegment = [];
-  let closed = false;
+  let completedPolygons = [];
   let busy = false;
-  let status = 'Click the map to place the first magnetic anchor.';
+  let status = 'Enable smart draw to start tracing paths.';
   let imageReady = false;
   let previewInFlight = false;
   let previewPixel;
   let previewToken = 0;
   let destroyed = false;
 
+  function getCurrentPathCoordinates() {
+    return mergeSegments(segments, liveSegment);
+  }
+
+  function hasActiveSketch() {
+    return anchors.length > 0 || segments.length > 0 || liveSegment.length > 0;
+  }
+
   function getSnapshot() {
     return {
+      enabled,
       pointCount: anchors.length,
-      closed,
       busy,
-      canClose: anchors.length >= 3 && !closed,
-      hasPath: mergeSegments(segments, liveSegment).length > 0,
+      canClose: anchors.length >= 3,
+      hasPath: completedPolygons.length > 0 || getCurrentPathCoordinates().length > 0,
+      canUndo: completedPolygons.length > 0 || hasActiveSketch(),
+      completedPathCount: completedPolygons.length,
       status
     };
   }
@@ -157,13 +217,24 @@ export function createBasicPathPlugin(options = {}) {
     notify();
   }
 
+  function resetPreviewState() {
+    previewPixel = undefined;
+    previewInFlight = false;
+    previewToken += 1;
+  }
+
+  function clearSketchState() {
+    anchors = [];
+    anchorPixels = [];
+    segments = [];
+    liveSegment = [];
+    imageReady = false;
+    resetPreviewState();
+  }
+
   function syncAnchorFeatures() {
     anchorFeatures.forEach((feature) => anchorSource.removeFeature(feature));
     anchorFeatures.length = 0;
-
-    if (closed) {
-      return;
-    }
 
     if (anchors.length === 0) {
       return;
@@ -175,9 +246,21 @@ export function createBasicPathPlugin(options = {}) {
     anchorSource.addFeature(feature);
   }
 
+  function syncSessionPolygonFeatures() {
+    sessionPolygonFeatures.forEach((feature) => sessionPolygonSource.removeFeature(feature));
+    sessionPolygonFeatures.length = 0;
+
+    for (const ring of completedPolygons) {
+      const feature = new Feature({geometry: new Polygon([ring])});
+      sessionPolygonFeatures.push(feature);
+      sessionPolygonSource.addFeature(feature);
+    }
+  }
+
   function syncPathGeometry() {
-    pathFeature.getGeometry().setCoordinates(mergeSegments(segments, liveSegment));
+    pathFeature.getGeometry().setCoordinates(getCurrentPathCoordinates());
     syncAnchorFeatures();
+    syncSessionPolygonFeatures();
     notify();
   }
 
@@ -305,12 +388,6 @@ export function createBasicPathPlugin(options = {}) {
       .filter(Boolean);
   }
 
-  function resetPreviewState() {
-    previewPixel = undefined;
-    previewInFlight = false;
-    previewToken += 1;
-  }
-
   function getSnapTargetPixel(pixel) {
     if (anchors.length >= 3 && pixelsClose(pixel, anchorPixels[0])) {
       return anchorPixels[0];
@@ -320,13 +397,13 @@ export function createBasicPathPlugin(options = {}) {
   }
 
   async function runPreviewLoop() {
-    if (previewInFlight || !previewPixel || !imageReady || busy || closed || anchors.length === 0) {
+    if (previewInFlight || !previewPixel || !imageReady || busy || anchors.length === 0 || !enabled) {
       return;
     }
 
     previewInFlight = true;
 
-    while (previewPixel && !busy && !closed && anchors.length > 0 && imageReady) {
+    while (previewPixel && !busy && anchors.length > 0 && imageReady && enabled) {
       const targetPixel = previewPixel;
       previewPixel = undefined;
       const token = ++previewToken;
@@ -342,8 +419,8 @@ export function createBasicPathPlugin(options = {}) {
           const hoveringStart = targetPixel === anchorPixels[0] && anchors.length >= 3;
           setStatus(
             hoveringStart
-              ? 'Click to close the path along the detected contour.'
-              : 'Move the pointer to preview the detected contour, then click to lock it.',
+              ? 'Click to close this smart path.'
+              : 'Move the pointer to preview the smart contour, then click to lock it.',
             false
           );
           syncPathGeometry();
@@ -363,7 +440,7 @@ export function createBasicPathPlugin(options = {}) {
   }
 
   async function refreshMagneticModel() {
-    if (!map || anchors.length === 0 || closed) {
+    if (!map || anchors.length === 0 || !enabled) {
       return;
     }
 
@@ -387,12 +464,9 @@ export function createBasicPathPlugin(options = {}) {
     }
 
     try {
+      clearSketchState();
       anchors = [coordinate];
       anchorPixels = [pixel];
-      segments = [];
-      liveSegment = [];
-      closed = false;
-      resetPreviewState();
       await analyzeCurrentView();
       await rebuildMapFromLastAnchor();
       setStatus('Contour detection ready. Move the pointer to trace the path.', false);
@@ -403,6 +477,21 @@ export function createBasicPathPlugin(options = {}) {
       setStatus(`Contour initialization failed: ${error.message}`, false);
       return false;
     }
+  }
+
+  async function finalizeClosedPath(snappedSegment) {
+    const mergedPath = mergeSegments([...segments, snappedSegment]);
+    const ring = createClosedRing(mergedPath);
+
+    if (!ring) {
+      return false;
+    }
+
+    completedPolygons = [...completedPolygons, ring];
+    clearSketchState();
+    setStatus('Path stored. Click to start another smart path, or toggle the tool off to commit.', false);
+    syncPathGeometry();
+    return true;
   }
 
   async function lockSegment(pixel) {
@@ -418,16 +507,13 @@ export function createBasicPathPlugin(options = {}) {
       return false;
     }
 
+    if (targetPixel === anchorPixels[0]) {
+      return finalizeClosedPath(snappedSegment);
+    }
+
     segments = [...segments, snappedSegment];
     liveSegment = [];
     resetPreviewState();
-
-    if (targetPixel === anchorPixels[0]) {
-      closed = true;
-      setStatus('Path closed. Clear it to start over.', false);
-      syncPathGeometry();
-      return true;
-    }
 
     const coordinate = map.getCoordinateFromPixel(targetPixel);
     if (!coordinate) {
@@ -450,12 +536,7 @@ export function createBasicPathPlugin(options = {}) {
   }
 
   async function handleClick(event) {
-    if (busy) {
-      return;
-    }
-
-    if (closed) {
-      setStatus('Path closed. Clear it to start over.', false);
+    if (!enabled || busy) {
       return;
     }
 
@@ -474,7 +555,7 @@ export function createBasicPathPlugin(options = {}) {
   }
 
   function handlePointerMove(event) {
-    if (!map || !imageReady || busy || closed || anchors.length === 0 || event.dragging) {
+    if (!map || !imageReady || busy || anchors.length === 0 || event.dragging || !enabled) {
       return;
     }
 
@@ -482,16 +563,21 @@ export function createBasicPathPlugin(options = {}) {
     void runPreviewLoop();
   }
 
-  function clearState() {
-    anchors = [];
-    anchorPixels = [];
-    segments = [];
-    liveSegment = [];
-    closed = false;
-    imageReady = false;
-    resetPreviewState();
-    setStatus('Click the map to place the first magnetic anchor.', false);
+  function resetSession(nextStatus = 'Enable smart draw to start tracing paths.') {
+    clearSketchState();
+    completedPolygons = [];
+    setStatus(nextStatus, false);
     syncPathGeometry();
+  }
+
+  function commitCompletedPaths() {
+    if (completedPolygons.length === 0) {
+      return false;
+    }
+
+    const geometry = new MultiPolygon(completedPolygons.map((ring) => [ring]));
+    outputSource.addFeature(new Feature({geometry}));
+    return true;
   }
 
   return {
@@ -504,16 +590,16 @@ export function createBasicPathPlugin(options = {}) {
       return () => listeners.delete(listener);
     },
     canClosePath() {
-      return anchors.length >= 3 && !closed;
+      return anchors.length >= 3;
     },
     getPointCount() {
       return anchors.length;
     },
     isClosed() {
-      return closed;
+      return false;
     },
     async closePath() {
-      if (!this.canClosePath()) {
+      if (!this.canClosePath() || !enabled) {
         return false;
       }
 
@@ -521,7 +607,59 @@ export function createBasicPathPlugin(options = {}) {
       return lockSegment(anchorPixels[0]);
     },
     clearPoints() {
-      clearState();
+      if (busy) {
+        return false;
+      }
+
+      if (hasActiveSketch()) {
+        clearSketchState();
+        setStatus(
+          completedPolygons.length > 0
+            ? 'Current path discarded. Click to start another smart path, or toggle the tool off to commit.'
+            : 'Current path discarded. Click the map to place the first magnetic anchor.',
+          false
+        );
+        syncPathGeometry();
+        return true;
+      }
+
+      if (completedPolygons.length > 0) {
+        completedPolygons = completedPolygons.slice(0, -1);
+        setStatus(
+          completedPolygons.length > 0
+            ? 'Last stored path removed.'
+            : 'Last stored path removed. Click the map to place the first magnetic anchor.',
+          false
+        );
+        syncPathGeometry();
+        return true;
+      }
+
+      return false;
+    },
+    setEnabled(nextEnabled) {
+      if (busy || enabled === nextEnabled) {
+        return enabled;
+      }
+
+      enabled = nextEnabled;
+
+      if (enabled) {
+        resetSession('Smart draw enabled. Click the map to place the first magnetic anchor.');
+        notify();
+        return enabled;
+      }
+
+      const committed = commitCompletedPaths();
+      resetSession(
+        committed
+          ? 'Smart draw disabled. MultiPolygon committed to the map.'
+          : 'Smart draw disabled.'
+      );
+      return enabled;
+    },
+    isEnabled() {
+      return enabled;
     },
     enableClickDrawing(targetMap) {
       map = targetMap;
@@ -538,6 +676,8 @@ export function createBasicPathPlugin(options = {}) {
     },
     apply(targetMap) {
       map = targetMap;
+      map.addLayer(outputLayer);
+      map.addLayer(sessionPolygonLayer);
       map.addLayer(pathLayer);
       map.addLayer(anchorLayer);
       return pathLayer;
