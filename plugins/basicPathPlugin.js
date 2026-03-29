@@ -42,6 +42,13 @@ function distanceToSegment(pixel, a, b) {
   return Math.hypot(pixel[0] - projection[0], pixel[1] - projection[1]);
 }
 
+function interpolateCoordinate(a, b, t) {
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t
+  ];
+}
+
 function createSnapshotCanvas(map) {
   const size = map.getSize();
   if (!size) {
@@ -148,6 +155,11 @@ export function createBasicPathPlugin(options = {}) {
   let previewInFlight = false;
   let previewPixel;
   let previewToken = 0;
+  let modifiedAnchorIndexes = [];
+  let dragPreviewInFlight = false;
+  let dragPreviewQueued = false;
+  let dragPreviewToken = 0;
+  let dragPreviewKeys = [];
   let destroyed = false;
 
   function getSnapshot() {
@@ -179,6 +191,7 @@ export function createBasicPathPlugin(options = {}) {
     anchors.forEach((coordinate, index) => {
       const feature = new Feature({geometry: new Point(coordinate)});
       feature.set('role', index === 0 ? 'start' : 'anchor');
+      feature.set('anchorIndex', index);
       anchorFeatures.push(feature);
       anchorSource.addFeature(feature);
     });
@@ -187,6 +200,11 @@ export function createBasicPathPlugin(options = {}) {
   function syncPathGeometry() {
     pathFeature.getGeometry().setCoordinates(mergeSegments(segments, liveSegment));
     syncAnchorFeatures();
+    notify();
+  }
+
+  function syncPathOnly() {
+    pathFeature.getGeometry().setCoordinates(mergeSegments(segments, liveSegment));
     notify();
   }
 
@@ -259,6 +277,111 @@ export function createBasicPathPlugin(options = {}) {
     return true;
   }
 
+  async function rebuildClosedSegmentAt(index) {
+    if (!closed || !map || anchors.length < 3) {
+      return false;
+    }
+
+    anchorPixels = getAnchorPixels();
+    const startPixel = anchorPixels[index];
+    const endPixel = anchorPixels[(index + 1) % anchors.length];
+
+    if (!startPixel || !endPixel) {
+      return false;
+    }
+
+    segments[index] = await buildSegmentBetweenPixels(startPixel, endPixel);
+    return true;
+  }
+
+  function getAdjacentSegmentIndexes(indexes) {
+    return [...new Set(
+      indexes.flatMap((index) => [
+        (index - 1 + anchors.length) % anchors.length,
+        index
+      ])
+    )];
+  }
+
+  async function applyClosedPathPreview(previewAnchors, token) {
+    if (!map || !closed || previewAnchors.length < 3) {
+      return false;
+    }
+
+    const previewPixels = previewAnchors
+      .map((coordinate) => map.getPixelFromCoordinate(coordinate))
+      .filter(Boolean);
+    const nextSegments = [...segments];
+
+    for (const segmentIndex of getAdjacentSegmentIndexes(modifiedAnchorIndexes)) {
+      const startPixel = previewPixels[segmentIndex];
+      const endPixel = previewPixels[(segmentIndex + 1) % previewAnchors.length];
+
+      if (!startPixel || !endPixel) {
+        continue;
+      }
+
+      nextSegments[segmentIndex] = await buildSegmentBetweenPixels(startPixel, endPixel);
+      if (token !== dragPreviewToken) {
+        return false;
+      }
+    }
+
+    anchors = previewAnchors;
+    anchorPixels = previewPixels;
+    segments = nextSegments;
+    return true;
+  }
+
+  async function runDragPreviewLoop() {
+    if (dragPreviewInFlight || !closed || modifiedAnchorIndexes.length === 0) {
+      return;
+    }
+
+    dragPreviewInFlight = true;
+
+    while (dragPreviewQueued && closed && modifiedAnchorIndexes.length > 0) {
+      dragPreviewQueued = false;
+      const token = ++dragPreviewToken;
+      const previewAnchors = anchorFeatures.map((feature) => feature.getGeometry().getCoordinates());
+
+      try {
+        const applied = await applyClosedPathPreview(previewAnchors, token);
+        if (!applied || token !== dragPreviewToken) {
+          continue;
+        }
+
+        syncPathOnly();
+        setStatus('Dragging a node. Release to lock the updated contour.', false);
+      } catch (error) {
+        console.error('Closed-path drag preview failed:', error);
+        setStatus(`Preview failed: ${error.message}`, false);
+      }
+    }
+
+    dragPreviewInFlight = false;
+    if (dragPreviewQueued) {
+      void runDragPreviewLoop();
+    }
+  }
+
+  function queueDragPreview() {
+    if (!closed || modifiedAnchorIndexes.length === 0) {
+      return;
+    }
+
+    dragPreviewQueued = true;
+    void runDragPreviewLoop();
+  }
+
+  function clearDragPreviewState() {
+    dragPreviewQueued = false;
+    dragPreviewInFlight = false;
+    dragPreviewToken += 1;
+    dragPreviewKeys.forEach((key) => unByKey(key));
+    dragPreviewKeys = [];
+  }
+
   function getNearestClosedSegmentIndex(pixel) {
     if (!map || !closed || segments.length === 0) {
       return -1;
@@ -282,6 +405,69 @@ export function createBasicPathPlugin(options = {}) {
     });
 
     return bestDistance <= 14 ? bestIndex : -1;
+  }
+
+  function splitSegmentAtPixel(segment, pixel) {
+    if (!map || segment.length < 2) {
+      return null;
+    }
+
+    let bestPointIndex = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    let bestProjectionPixel;
+    let bestProjectionCoordinate;
+
+    for (let pointIndex = 1; pointIndex < segment.length; pointIndex += 1) {
+      const startCoordinate = segment[pointIndex - 1];
+      const endCoordinate = segment[pointIndex];
+      const startPixel = map.getPixelFromCoordinate(startCoordinate);
+      const endPixel = map.getPixelFromCoordinate(endCoordinate);
+
+      if (!startPixel || !endPixel) {
+        continue;
+      }
+
+      const dx = endPixel[0] - startPixel[0];
+      const dy = endPixel[1] - startPixel[1];
+      const lengthSquared = dx * dx + dy * dy;
+      const t = lengthSquared === 0
+        ? 0
+        : Math.max(
+            0,
+            Math.min(1, ((pixel[0] - startPixel[0]) * dx + (pixel[1] - startPixel[1]) * dy) / lengthSquared)
+          );
+      const projectionPixel = [startPixel[0] + t * dx, startPixel[1] + t * dy];
+      const distance = Math.hypot(pixel[0] - projectionPixel[0], pixel[1] - projectionPixel[1]);
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestPointIndex = pointIndex;
+        bestProjectionPixel = projectionPixel;
+        bestProjectionCoordinate = interpolateCoordinate(startCoordinate, endCoordinate, t);
+      }
+    }
+
+    if (bestPointIndex < 1 || bestDistance > 14 || !bestProjectionPixel || !bestProjectionCoordinate) {
+      return null;
+    }
+
+    const startPixel = map.getPixelFromCoordinate(segment[0]);
+    const endPixel = map.getPixelFromCoordinate(segment[segment.length - 1]);
+    if (
+      (startPixel && pixelsClose(bestProjectionPixel, startPixel, 8)) ||
+      (endPixel && pixelsClose(bestProjectionPixel, endPixel, 8))
+    ) {
+      return null;
+    }
+
+    const leftSegment = [...segment.slice(0, bestPointIndex), bestProjectionCoordinate];
+    const rightSegment = [bestProjectionCoordinate, ...segment.slice(bestPointIndex)];
+
+    return {
+      coordinate: bestProjectionCoordinate,
+      leftSegment,
+      rightSegment
+    };
   }
 
   function createWorkerIfNeeded() {
@@ -610,18 +796,20 @@ export function createBasicPathPlugin(options = {}) {
       return;
     }
 
-    const coordinate = map.getCoordinateFromPixel(event.pixel);
-    if (!coordinate) {
+    const splitSegment = splitSegmentAtPixel(segments[insertionIndex], event.pixel);
+    if (!splitSegment) {
       return;
     }
 
     event.preventDefault();
-    anchors.splice(insertionIndex + 1, 0, coordinate);
-    syncAnchorFeatures();
+    anchors.splice(insertionIndex + 1, 0, splitSegment.coordinate);
 
     try {
       setStatus('Inserting a new node into the closed path...', true);
-      await rebuildSegmentsFromAnchors('Node inserted. Drag nodes to continue editing the closed path.');
+      segments.splice(insertionIndex, 1, splitSegment.leftSegment, splitSegment.rightSegment);
+      anchorPixels = getAnchorPixels();
+      syncPathGeometry();
+      setStatus('Node inserted. Drag nodes to continue editing the closed path.', false);
     } catch (error) {
       console.error('Closed-path insertion failed:', error);
       setStatus(`Inserting the node failed: ${error.message}`, false);
@@ -633,19 +821,31 @@ export function createBasicPathPlugin(options = {}) {
       return;
     }
 
-    anchors = anchorFeatures.map((feature) => feature.getGeometry().getCoordinates());
+    clearDragPreviewState();
 
     try {
       setStatus('Rebuilding the closed path after moving a node...', true);
-      await rebuildSegmentsFromAnchors('Path updated. Drag nodes or Shift-click the path to keep editing.');
+      anchors = anchorFeatures.map((feature) => feature.getGeometry().getCoordinates());
+      anchorPixels = getAnchorPixels();
+
+      const segmentIndexes = getAdjacentSegmentIndexes(modifiedAnchorIndexes);
+      for (const segmentIndex of segmentIndexes) {
+        await rebuildClosedSegmentAt(segmentIndex);
+      }
+
+      syncPathGeometry();
+      setStatus('Path updated. Drag nodes or Shift-click the path to keep editing.', false);
     } catch (error) {
       console.error('Closed-path edit failed:', error);
       setStatus(`Updating the path failed: ${error.message}`, false);
       syncAnchorFeatures();
+    } finally {
+      modifiedAnchorIndexes = [];
     }
   }
 
   function clearState() {
+    clearDragPreviewState();
     anchors = [];
     anchorPixels = [];
     segments = [];
@@ -699,8 +899,28 @@ export function createBasicPathPlugin(options = {}) {
         source: anchorSource,
         condition: () => closed && !busy
       });
-      modifyInteraction.on('modifystart', () => {
-        setStatus('Dragging a node. Release to rebuild the closed path.', false);
+      modifyInteraction.on('modifystart', async (event) => {
+        modifiedAnchorIndexes = event.features
+          .getArray()
+          .map((feature) => feature.get('anchorIndex'))
+          .filter((index) => Number.isInteger(index));
+        clearDragPreviewState();
+        setStatus('Preparing live contour preview for the dragged node...', true);
+        try {
+          await analyzeCurrentView();
+          dragPreviewKeys = event.features
+            .getArray()
+            .map((feature) => feature.getGeometry())
+            .filter(Boolean)
+            .map((geometry) => geometry.on('change', () => {
+              queueDragPreview();
+            }));
+          queueDragPreview();
+          setStatus('Dragging a node. Release to lock the updated contour.', false);
+        } catch (error) {
+          console.error('Closed-path drag preparation failed:', error);
+          setStatus(`Preparing the preview failed: ${error.message}`, false);
+        }
       });
       modifyInteraction.on('modifyend', () => {
         void handleAnchorModifyEnd();
@@ -719,6 +939,7 @@ export function createBasicPathPlugin(options = {}) {
     destroy() {
       destroyed = true;
       workerReady = false;
+      clearDragPreviewState();
       unByKey(clickKey);
       unByKey(moveKey);
       unByKey(moveEndKey);
