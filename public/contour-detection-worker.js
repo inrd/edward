@@ -5,7 +5,8 @@ let settings = {
   edgeBias: 8,
   lineBias: 1.35,
   turnBias: 1.1,
-  continuityBias: 1.35
+  continuityBias: 1.35,
+  guideBias: 0.3
 };
 
 let model;
@@ -117,6 +118,41 @@ function buildLineDistanceEvaluator(start, end) {
   const inverseDenominator = 1 / Math.hypot(dx, dy);
 
   return (x, y) => Math.abs(dy * x - dx * y + intercept) * inverseDenominator;
+}
+
+function pointToSegmentDistance(x, y, start, end) {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const lengthSquared = dx * dx + dy * dy;
+
+  if (lengthSquared === 0) {
+    return Math.hypot(x - start[0], y - start[1]);
+  }
+
+  const t = clamp(((x - start[0]) * dx + (y - start[1]) * dy) / lengthSquared, 0, 1);
+  const projectionX = start[0] + t * dx;
+  const projectionY = start[1] + t * dy;
+  return Math.hypot(x - projectionX, y - projectionY);
+}
+
+function buildGuideDistanceEvaluator(points) {
+  if (!points || points.length < 2) {
+    return () => 0;
+  }
+
+  const guidePoints = points.map(pixelToGrid);
+  return (x, y) => {
+    let minDistance = Number.POSITIVE_INFINITY;
+
+    for (let index = 1; index < guidePoints.length; index += 1) {
+      const distance = pointToSegmentDistance(x, y, guidePoints[index - 1], guidePoints[index]);
+      if (distance < minDistance) {
+        minDistance = distance;
+      }
+    }
+
+    return Number.isFinite(minDistance) ? minDistance : 0;
+  };
 }
 
 function getTurnCost(parentIndex, currentX, currentY, nextX, nextY, gridWidth) {
@@ -305,7 +341,7 @@ function buildSearchBounds(start, end) {
   };
 }
 
-function findContourPath(targetPixel, continuity = {}) {
+function findContourPath(targetPixel, continuity = {}, guidePoints) {
   if (!model || !anchorPoint) {
     throw new Error('Contour model is not ready.');
   }
@@ -322,6 +358,7 @@ function findContourPath(targetPixel, continuity = {}) {
   const parent = new Int32Array(gridSize);
   const closed = new Uint8Array(gridSize);
   const distanceFromPathLine = buildLineDistanceEvaluator(start, goal);
+  const distanceFromGuidePath = buildGuideDistanceEvaluator(guidePoints);
   const iterationLimit = Math.max(6000, (bounds.maxX - bounds.minX + 1) * (bounds.maxY - bounds.minY + 1) * 2);
   let iterations = 0;
 
@@ -372,6 +409,7 @@ function findContourPath(targetPixel, continuity = {}) {
       const edgeStrength = gradientAt(nextX, nextY);
       const edgeCost = (1 - edgeStrength) * settings.edgeBias;
       const lineCost = distanceFromPathLine(nextX, nextY) * settings.lineBias * 0.08;
+      const guideCost = distanceFromGuidePath(nextX, nextY) * settings.guideBias * 0.06;
       const turnCost = getTurnCost(parent[currentIndex], currentX, currentY, nextX, nextY, gridWidth);
       const stepDirection = [nextX - currentX, nextY - currentY];
       const startContinuityCost = currentIndex === startIndex
@@ -381,7 +419,7 @@ function findContourPath(targetPixel, continuity = {}) {
         ? getDirectionCost(stepDirection, continuity.endDirection)
         : 0;
       const tentativeScore =
-        currentScore + movementCost + edgeCost + lineCost + turnCost + startContinuityCost + endContinuityCost;
+        currentScore + movementCost + edgeCost + lineCost + guideCost + turnCost + startContinuityCost + endContinuityCost;
 
       if (tentativeScore >= scores[nextIndex]) {
         continue;
@@ -427,7 +465,7 @@ self.addEventListener('message', (event) => {
     }
 
     if (type === 'getContour') {
-      const points = findContourPath([payload.x, payload.y], payload.continuity);
+      const points = findContourPath([payload.x, payload.y], payload.continuity, payload.guidePoints);
       postSuccess(id, {points});
       return;
     }

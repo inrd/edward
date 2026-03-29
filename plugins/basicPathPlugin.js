@@ -1,7 +1,6 @@
 import Feature from 'ol/Feature';
 import LineString from 'ol/geom/LineString';
 import Point from 'ol/geom/Point';
-import Modify from 'ol/interaction/Modify.js';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
 import {unByKey} from 'ol/Observable';
@@ -27,26 +26,6 @@ function mergeSegments(segments, liveSegment = []) {
   }
 
   return merged;
-}
-
-function distanceToSegment(pixel, a, b) {
-  const dx = b[0] - a[0];
-  const dy = b[1] - a[1];
-
-  if (dx === 0 && dy === 0) {
-    return Math.hypot(pixel[0] - a[0], pixel[1] - a[1]);
-  }
-
-  const t = Math.max(0, Math.min(1, ((pixel[0] - a[0]) * dx + (pixel[1] - a[1]) * dy) / (dx * dx + dy * dy)));
-  const projection = [a[0] + t * dx, a[1] + t * dy];
-  return Math.hypot(pixel[0] - projection[0], pixel[1] - projection[1]);
-}
-
-function interpolateCoordinate(a, b, t) {
-  return [
-    a[0] + (b[0] - a[0]) * t,
-    a[1] + (b[1] - a[1]) * t
-  ];
 }
 
 function createSnapshotCanvas(map) {
@@ -138,7 +117,6 @@ export function createBasicPathPlugin(options = {}) {
   let clickKey;
   let moveKey;
   let moveEndKey;
-  let modifyInteraction;
   let worker;
   let workerReady = false;
   let requestId = 0;
@@ -155,11 +133,6 @@ export function createBasicPathPlugin(options = {}) {
   let previewInFlight = false;
   let previewPixel;
   let previewToken = 0;
-  let modifiedAnchorIndexes = [];
-  let dragPreviewInFlight = false;
-  let dragPreviewQueued = false;
-  let dragPreviewToken = 0;
-  let dragPreviewKeys = [];
   let destroyed = false;
 
   function getSnapshot() {
@@ -188,335 +161,24 @@ export function createBasicPathPlugin(options = {}) {
     anchorFeatures.forEach((feature) => anchorSource.removeFeature(feature));
     anchorFeatures.length = 0;
 
-    anchors.forEach((coordinate, index) => {
-      const feature = new Feature({geometry: new Point(coordinate)});
-      feature.set('role', index === 0 ? 'start' : 'anchor');
-      feature.set('anchorIndex', index);
-      anchorFeatures.push(feature);
-      anchorSource.addFeature(feature);
-    });
+    if (closed) {
+      return;
+    }
+
+    if (anchors.length === 0) {
+      return;
+    }
+
+    const feature = new Feature({geometry: new Point(anchors[0])});
+    feature.set('role', 'start');
+    anchorFeatures.push(feature);
+    anchorSource.addFeature(feature);
   }
 
   function syncPathGeometry() {
     pathFeature.getGeometry().setCoordinates(mergeSegments(segments, liveSegment));
     syncAnchorFeatures();
     notify();
-  }
-
-  function syncPathOnly() {
-    pathFeature.getGeometry().setCoordinates(mergeSegments(segments, liveSegment));
-    notify();
-  }
-
-  function getAnchorPixels() {
-    if (!map) {
-      return [];
-    }
-
-    return anchors.map((coordinate) => map.getPixelFromCoordinate(coordinate)).filter(Boolean);
-  }
-
-  function getSegmentDirectionAt(segment, side) {
-    if (!segment || segment.length < 2) {
-      return null;
-    }
-
-    if (side === 'start') {
-      const [a, b] = segment;
-      return [b[0] - a[0], b[1] - a[1]];
-    }
-
-    const a = segment[segment.length - 2];
-    const b = segment[segment.length - 1];
-    return [b[0] - a[0], b[1] - a[1]];
-  }
-
-  function getContinuityHints(segmentIndex, segmentList = segments, affectedIndexes = new Set()) {
-    if (!closed || anchors.length < 3) {
-      return undefined;
-    }
-
-    const previousIndex = (segmentIndex - 1 + anchors.length) % anchors.length;
-    const nextIndex = (segmentIndex + 1) % anchors.length;
-    const continuity = {};
-
-    if (!affectedIndexes.has(previousIndex)) {
-      const previousDirection = getSegmentDirectionAt(segmentList[previousIndex], 'end');
-      if (previousDirection) {
-        continuity.startDirection = previousDirection;
-      }
-    }
-
-    if (!affectedIndexes.has(nextIndex)) {
-      const nextDirection = getSegmentDirectionAt(segmentList[nextIndex], 'start');
-      if (nextDirection) {
-        continuity.endDirection = nextDirection;
-      }
-    }
-
-    return continuity.startDirection || continuity.endDirection ? continuity : undefined;
-  }
-
-  async function buildSegmentBetweenPixels(startPixel, endPixel, continuity) {
-    await callWorker('buildMap', {
-      x: Math.round(startPixel[0]),
-      y: Math.round(startPixel[1])
-    });
-
-    const contourPixels = await getContourPixels(endPixel, continuity);
-    const contourCoordinates = pixelsToCoordinates(contourPixels);
-
-    if (contourCoordinates.length >= 2) {
-      return contourCoordinates;
-    }
-
-    const startCoordinate = map?.getCoordinateFromPixel(startPixel);
-    const endCoordinate = map?.getCoordinateFromPixel(endPixel);
-    return startCoordinate && endCoordinate ? [startCoordinate, endCoordinate] : [];
-  }
-
-  async function rebuildSegmentsFromAnchors(nextStatus) {
-    if (!map) {
-      return false;
-    }
-
-    anchorPixels = getAnchorPixels();
-    liveSegment = [];
-    resetPreviewState();
-
-    if (anchors.length <= 1) {
-      segments = [];
-      syncPathGeometry();
-      setStatus(nextStatus, false);
-      return true;
-    }
-
-    await analyzeCurrentView();
-
-    const nextSegments = [];
-    const segmentCount = closed ? anchors.length : anchors.length - 1;
-
-    for (let index = 0; index < segmentCount; index += 1) {
-      const startPixel = anchorPixels[index];
-      const endPixel = anchorPixels[(index + 1) % anchors.length];
-      if (!startPixel || !endPixel) {
-        continue;
-      }
-
-      nextSegments.push(await buildSegmentBetweenPixels(startPixel, endPixel));
-    }
-
-    segments = nextSegments;
-    anchorPixels = getAnchorPixels();
-
-    if (!closed && anchors.length > 0) {
-      await rebuildMapFromLastAnchor();
-    }
-
-    syncPathGeometry();
-    setStatus(nextStatus, false);
-    return true;
-  }
-
-  async function rebuildClosedSegmentAt(index, segmentList = segments, affectedIndexes = new Set()) {
-    if (!closed || !map || anchors.length < 3) {
-      return false;
-    }
-
-    anchorPixels = getAnchorPixels();
-    const startPixel = anchorPixels[index];
-    const endPixel = anchorPixels[(index + 1) % anchors.length];
-
-    if (!startPixel || !endPixel) {
-      return false;
-    }
-
-    segmentList[index] = await buildSegmentBetweenPixels(
-      startPixel,
-      endPixel,
-      getContinuityHints(index, segmentList, affectedIndexes)
-    );
-    return true;
-  }
-
-  function getAdjacentSegmentIndexes(indexes) {
-    return [...new Set(
-      indexes.flatMap((index) => [
-        (index - 1 + anchors.length) % anchors.length,
-        index
-      ])
-    )];
-  }
-
-  async function applyClosedPathPreview(previewAnchors, token) {
-    if (!map || !closed || previewAnchors.length < 3) {
-      return false;
-    }
-
-    const previewPixels = previewAnchors
-      .map((coordinate) => map.getPixelFromCoordinate(coordinate))
-      .filter(Boolean);
-    const nextSegments = [...segments];
-
-    for (const segmentIndex of getAdjacentSegmentIndexes(modifiedAnchorIndexes)) {
-      const startPixel = previewPixels[segmentIndex];
-      const endPixel = previewPixels[(segmentIndex + 1) % previewAnchors.length];
-
-      if (!startPixel || !endPixel) {
-        continue;
-      }
-
-      nextSegments[segmentIndex] = await buildSegmentBetweenPixels(
-        startPixel,
-        endPixel,
-        getContinuityHints(segmentIndex, nextSegments, new Set(getAdjacentSegmentIndexes(modifiedAnchorIndexes)))
-      );
-      if (token !== dragPreviewToken) {
-        return false;
-      }
-    }
-
-    anchors = previewAnchors;
-    anchorPixels = previewPixels;
-    segments = nextSegments;
-    return true;
-  }
-
-  async function runDragPreviewLoop() {
-    if (dragPreviewInFlight || !closed || modifiedAnchorIndexes.length === 0) {
-      return;
-    }
-
-    dragPreviewInFlight = true;
-
-    while (dragPreviewQueued && closed && modifiedAnchorIndexes.length > 0) {
-      dragPreviewQueued = false;
-      const token = ++dragPreviewToken;
-      const previewAnchors = anchorFeatures.map((feature) => feature.getGeometry().getCoordinates());
-
-      try {
-        const applied = await applyClosedPathPreview(previewAnchors, token);
-        if (!applied || token !== dragPreviewToken) {
-          continue;
-        }
-
-        syncPathOnly();
-        setStatus('Dragging a node. Release to lock the updated contour.', false);
-      } catch (error) {
-        console.error('Closed-path drag preview failed:', error);
-        setStatus(`Preview failed: ${error.message}`, false);
-      }
-    }
-
-    dragPreviewInFlight = false;
-    if (dragPreviewQueued) {
-      void runDragPreviewLoop();
-    }
-  }
-
-  function queueDragPreview() {
-    if (!closed || modifiedAnchorIndexes.length === 0) {
-      return;
-    }
-
-    dragPreviewQueued = true;
-    void runDragPreviewLoop();
-  }
-
-  function clearDragPreviewState() {
-    dragPreviewQueued = false;
-    dragPreviewInFlight = false;
-    dragPreviewToken += 1;
-    dragPreviewKeys.forEach((key) => unByKey(key));
-    dragPreviewKeys = [];
-  }
-
-  function getNearestClosedSegmentIndex(pixel) {
-    if (!map || !closed || segments.length === 0) {
-      return -1;
-    }
-
-    let bestIndex = -1;
-    let bestDistance = Number.POSITIVE_INFINITY;
-
-    segments.forEach((segment, index) => {
-      const segmentPixels = segment
-        .map((coordinate) => map.getPixelFromCoordinate(coordinate))
-        .filter(Boolean);
-
-      for (let pointIndex = 1; pointIndex < segmentPixels.length; pointIndex += 1) {
-        const distance = distanceToSegment(pixel, segmentPixels[pointIndex - 1], segmentPixels[pointIndex]);
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          bestIndex = index;
-        }
-      }
-    });
-
-    return bestDistance <= 14 ? bestIndex : -1;
-  }
-
-  function splitSegmentAtPixel(segment, pixel) {
-    if (!map || segment.length < 2) {
-      return null;
-    }
-
-    let bestPointIndex = -1;
-    let bestDistance = Number.POSITIVE_INFINITY;
-    let bestProjectionPixel;
-    let bestProjectionCoordinate;
-
-    for (let pointIndex = 1; pointIndex < segment.length; pointIndex += 1) {
-      const startCoordinate = segment[pointIndex - 1];
-      const endCoordinate = segment[pointIndex];
-      const startPixel = map.getPixelFromCoordinate(startCoordinate);
-      const endPixel = map.getPixelFromCoordinate(endCoordinate);
-
-      if (!startPixel || !endPixel) {
-        continue;
-      }
-
-      const dx = endPixel[0] - startPixel[0];
-      const dy = endPixel[1] - startPixel[1];
-      const lengthSquared = dx * dx + dy * dy;
-      const t = lengthSquared === 0
-        ? 0
-        : Math.max(
-            0,
-            Math.min(1, ((pixel[0] - startPixel[0]) * dx + (pixel[1] - startPixel[1]) * dy) / lengthSquared)
-          );
-      const projectionPixel = [startPixel[0] + t * dx, startPixel[1] + t * dy];
-      const distance = Math.hypot(pixel[0] - projectionPixel[0], pixel[1] - projectionPixel[1]);
-
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestPointIndex = pointIndex;
-        bestProjectionPixel = projectionPixel;
-        bestProjectionCoordinate = interpolateCoordinate(startCoordinate, endCoordinate, t);
-      }
-    }
-
-    if (bestPointIndex < 1 || bestDistance > 14 || !bestProjectionPixel || !bestProjectionCoordinate) {
-      return null;
-    }
-
-    const startPixel = map.getPixelFromCoordinate(segment[0]);
-    const endPixel = map.getPixelFromCoordinate(segment[segment.length - 1]);
-    if (
-      (startPixel && pixelsClose(bestProjectionPixel, startPixel, 8)) ||
-      (endPixel && pixelsClose(bestProjectionPixel, endPixel, 8))
-    ) {
-      return null;
-    }
-
-    const leftSegment = [...segment.slice(0, bestPointIndex), bestProjectionCoordinate];
-    const rightSegment = [bestProjectionCoordinate, ...segment.slice(bestPointIndex)];
-
-    return {
-      coordinate: bestProjectionCoordinate,
-      leftSegment,
-      rightSegment
-    };
   }
 
   function createWorkerIfNeeded() {
@@ -575,7 +237,8 @@ export function createBasicPathPlugin(options = {}) {
         edgeBias: options.edgeBias ?? 8,
         lineBias: options.lineBias ?? 1.35,
         turnBias: options.turnBias ?? 1.1,
-        continuityBias: options.continuityBias ?? 1.35
+        continuityBias: options.continuityBias ?? 1.35,
+        guideBias: options.guideBias ?? 0.3
       }
     });
     workerReady = true;
@@ -623,11 +286,10 @@ export function createBasicPathPlugin(options = {}) {
     });
   }
 
-  async function getContourPixels(targetPixel, continuity) {
+  async function getContourPixels(targetPixel) {
     const result = await callWorker('getContour', {
       x: Math.round(targetPixel[0]),
-      y: Math.round(targetPixel[1]),
-      continuity
+      y: Math.round(targetPixel[1])
     });
 
     return result.points ?? [];
@@ -762,7 +424,7 @@ export function createBasicPathPlugin(options = {}) {
 
     if (targetPixel === anchorPixels[0]) {
       closed = true;
-      setStatus('Path closed. Drag nodes to move them, or Shift-click the path to insert a new one.', false);
+      setStatus('Path closed. Clear it to start over.', false);
       syncPathGeometry();
       return true;
     }
@@ -793,12 +455,7 @@ export function createBasicPathPlugin(options = {}) {
     }
 
     if (closed) {
-      if (event.originalEvent?.shiftKey) {
-        await handleClosedPathInsert(event);
-        return;
-      }
-
-      setStatus('Path closed. Drag nodes to move them, or Shift-click the path to insert a new one.', false);
+      setStatus('Path closed. Clear it to start over.', false);
       return;
     }
 
@@ -825,80 +482,7 @@ export function createBasicPathPlugin(options = {}) {
     void runPreviewLoop();
   }
 
-  async function handleClosedPathInsert(event) {
-    if (!map || busy || !closed) {
-      return;
-    }
-
-    const clickedPath = map.forEachFeatureAtPixel(
-      event.pixel,
-      (feature) => feature,
-      {
-        layerFilter: (layer) => layer === pathLayer,
-        hitTolerance: 8
-      }
-    );
-
-    if (clickedPath !== pathFeature) {
-      return;
-    }
-
-    const insertionIndex = getNearestClosedSegmentIndex(event.pixel);
-    if (insertionIndex < 0) {
-      return;
-    }
-
-    const splitSegment = splitSegmentAtPixel(segments[insertionIndex], event.pixel);
-    if (!splitSegment) {
-      return;
-    }
-
-    event.preventDefault();
-    anchors.splice(insertionIndex + 1, 0, splitSegment.coordinate);
-
-    try {
-      setStatus('Inserting a new node into the closed path...', true);
-      segments.splice(insertionIndex, 1, splitSegment.leftSegment, splitSegment.rightSegment);
-      anchorPixels = getAnchorPixels();
-      syncPathGeometry();
-      setStatus('Node inserted. Drag nodes to continue editing the closed path.', false);
-    } catch (error) {
-      console.error('Closed-path insertion failed:', error);
-      setStatus(`Inserting the node failed: ${error.message}`, false);
-    }
-  }
-
-  async function handleAnchorModifyEnd() {
-    if (!closed || !map) {
-      return;
-    }
-
-    clearDragPreviewState();
-
-    try {
-      setStatus('Rebuilding the closed path after moving a node...', true);
-      anchors = anchorFeatures.map((feature) => feature.getGeometry().getCoordinates());
-      anchorPixels = getAnchorPixels();
-
-      const segmentIndexes = getAdjacentSegmentIndexes(modifiedAnchorIndexes);
-      const affectedIndexes = new Set(segmentIndexes);
-      for (const segmentIndex of segmentIndexes) {
-        await rebuildClosedSegmentAt(segmentIndex, segments, affectedIndexes);
-      }
-
-      syncPathGeometry();
-      setStatus('Path updated. Drag nodes or Shift-click the path to keep editing.', false);
-    } catch (error) {
-      console.error('Closed-path edit failed:', error);
-      setStatus(`Updating the path failed: ${error.message}`, false);
-      syncAnchorFeatures();
-    } finally {
-      modifiedAnchorIndexes = [];
-    }
-  }
-
   function clearState() {
-    clearDragPreviewState();
     anchors = [];
     anchorPixels = [];
     segments = [];
@@ -948,37 +532,6 @@ export function createBasicPathPlugin(options = {}) {
       moveEndKey = map.on('moveend', () => {
         void refreshMagneticModel();
       });
-      modifyInteraction = new Modify({
-        source: anchorSource,
-        condition: () => closed && !busy
-      });
-      modifyInteraction.on('modifystart', async (event) => {
-        modifiedAnchorIndexes = event.features
-          .getArray()
-          .map((feature) => feature.get('anchorIndex'))
-          .filter((index) => Number.isInteger(index));
-        clearDragPreviewState();
-        setStatus('Preparing live contour preview for the dragged node...', true);
-        try {
-          await analyzeCurrentView();
-          dragPreviewKeys = event.features
-            .getArray()
-            .map((feature) => feature.getGeometry())
-            .filter(Boolean)
-            .map((geometry) => geometry.on('change', () => {
-              queueDragPreview();
-            }));
-          queueDragPreview();
-          setStatus('Dragging a node. Release to lock the updated contour.', false);
-        } catch (error) {
-          console.error('Closed-path drag preparation failed:', error);
-          setStatus(`Preparing the preview failed: ${error.message}`, false);
-        }
-      });
-      modifyInteraction.on('modifyend', () => {
-        void handleAnchorModifyEnd();
-      });
-      map.addInteraction(modifyInteraction);
     },
     enableVertexEditing() {
       return null;
@@ -992,13 +545,9 @@ export function createBasicPathPlugin(options = {}) {
     destroy() {
       destroyed = true;
       workerReady = false;
-      clearDragPreviewState();
       unByKey(clickKey);
       unByKey(moveKey);
       unByKey(moveEndKey);
-      if (map && modifyInteraction) {
-        map.removeInteraction(modifyInteraction);
-      }
       pendingRequests.forEach(({reject}) => reject(new Error('Plugin destroyed.')));
       pendingRequests.clear();
       worker?.terminate();
