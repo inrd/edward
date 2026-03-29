@@ -3,7 +3,7 @@ import {Map, View} from 'ol';
 import TileLayer from 'ol/layer/Tile';
 import OSM from 'ol/source/OSM';
 import {fromLonLat} from 'ol/proj';
-import {createEdwardPlugin} from './plugins/edwardPlugin.js';
+import {createEdwardPlugin} from './src/index.js';
 
 const map = new Map({
   target: 'map',

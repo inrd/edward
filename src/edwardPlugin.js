@@ -8,7 +8,6 @@ import VectorSource from 'ol/source/Vector';
 import {unByKey} from 'ol/Observable';
 import {Circle as CircleStyle, Fill, Stroke, Style} from 'ol/style';
 
-const WORKER_URL = '/contour-detection-worker.js';
 const SIMPLIFICATION_PRESETS = {
   low: {
     simplifyTolerance: 0.85,
@@ -119,12 +118,13 @@ export function createEdwardPlugin(options = {}) {
   const strokeColor = options.color ?? '#ff5a36';
   const fillColor = options.fillColor ?? 'rgba(255, 90, 54, 0.18)';
   const committedFillColor = options.committedFillColor ?? 'rgba(255, 90, 54, 0.22)';
+  const externalOutputSource = options.outputSource instanceof VectorSource ? options.outputSource : null;
 
   const pathFeature = new Feature({geometry: new LineString([])});
   const pathSource = new VectorSource({features: [pathFeature]});
   const anchorSource = new VectorSource();
   const sessionPolygonSource = new VectorSource();
-  const outputSource = new VectorSource();
+  const outputSource = externalOutputSource ?? new VectorSource();
   const anchorFeatures = [];
   const sessionPolygonFeatures = [];
   const listeners = new Set();
@@ -307,7 +307,9 @@ export function createEdwardPlugin(options = {}) {
       return worker;
     }
 
-    worker = new Worker(WORKER_URL);
+    worker = new Worker(new URL('./contour-detection-worker.js', import.meta.url), {
+      type: 'module'
+    });
     worker.addEventListener('message', (event) => {
       const {id, ok, result, error} = event.data;
       const pending = pendingRequests.get(id);
@@ -620,6 +622,8 @@ export function createEdwardPlugin(options = {}) {
     id: 'edward',
     layer: pathLayer,
     feature: pathFeature,
+    outputSource,
+    outputLayer,
     subscribe(listener) {
       listeners.add(listener);
       listener(getSnapshot());
@@ -743,7 +747,9 @@ export function createEdwardPlugin(options = {}) {
     },
     apply(targetMap) {
       map = targetMap;
-      map.addLayer(outputLayer);
+      if (!externalOutputSource) {
+        map.addLayer(outputLayer);
+      }
       map.addLayer(sessionPolygonLayer);
       map.addLayer(pathLayer);
       map.addLayer(anchorLayer);

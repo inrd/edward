@@ -1,15 +1,26 @@
 {
   "name": "edward",
   "version": "1.0.0",
+  "description": "Contour-aware path tracing for OpenLayers maps.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "start": "vite",
     "build": "vite build",
     "serve": "vite preview"
   },
   "devDependencies": {
+    "ol": "latest",
     "vite": "^7.1.11"
   },
-  "dependencies": {
-    "ol": "latest"
+  "peerDependencies": {
+    "ol": ">=10"
   }
 }

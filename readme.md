@@ -1,16 +1,65 @@
 # Edward
 
-Edward is the plugin/application in this project. It provides an OpenLayers-based smart path drawing workflow with contour detection, live previewing, and polygon output.
+Edward is a contour-aware tracing plugin for OpenLayers. It captures the rendered map, extracts image gradients in a worker, and snaps interactive path tracing to visible contours.
 
-To run Edward locally:
+## Install
 
-    npm install
-    npm start
+```bash
+npm install edward ol
+```
 
-To create a production build:
+## Integrate with OpenLayers
 
-    npm run build
+```js
+import {Map, View} from 'ol';
+import TileLayer from 'ol/layer/Tile';
+import OSM from 'ol/source/OSM';
+import {createEdwardPlugin} from 'edward';
 
-To preview the production build locally:
+const map = new Map({
+  target: 'map',
+  layers: [
+    new TileLayer({source: new OSM()})
+  ],
+  view: new View({
+    center: [0, 0],
+    zoom: 2
+  })
+});
 
-    npm run serve
+const edward = createEdwardPlugin();
+edward.apply(map);
+edward.enableClickDrawing(map);
+edward.setEnabled(true);
+```
+
+If your application already owns a `VectorSource`, you can inject it so Edward writes committed polygons into your existing editing pipeline:
+
+```js
+import VectorLayer from 'ol/layer/Vector';
+import VectorSource from 'ol/source/Vector';
+
+const outputSource = new VectorSource();
+map.addLayer(new VectorLayer({source: outputSource}));
+
+const edward = createEdwardPlugin({outputSource});
+edward.apply(map);
+edward.enableClickDrawing(map);
+```
+
+## Local development
+
+To run the demo locally:
+
+```bash
+npm install
+npm start
+```
+
+To build the publishable library:
+
+```bash
+npm run build
+```
+
+This writes the package entry and worker asset to `dist/`.
