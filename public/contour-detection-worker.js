@@ -1,3 +1,12 @@
+/*
+ * Contour extraction outline:
+ * 1. Downsample the map snapshot and convert it to grayscale.
+ * 2. Compute gradient strength so strong image edges become cheap to follow.
+ * 3. Run a guided path search between anchors, balancing edge strength,
+ *    line continuity, and turn cost.
+ * 4. Convert the winning grid path back to pixels and simplify it before
+ *    returning the traced contour to the main thread.
+ */
 let settings = {
   gridStep: 2,
   searchPadding: 52,

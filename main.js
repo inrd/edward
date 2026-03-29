@@ -3,7 +3,7 @@ import {Map, View} from 'ol';
 import TileLayer from 'ol/layer/Tile';
 import OSM from 'ol/source/OSM';
 import {fromLonLat} from 'ol/proj';
-import {createBasicPathPlugin} from './plugins/basicPathPlugin.js';
+import {createEdwardPlugin} from './plugins/edwardPlugin.js';
 
 const map = new Map({
   target: 'map',
@@ -18,12 +18,23 @@ const map = new Map({
   })
 });
 
-const basicPathPlugin = createBasicPathPlugin();
-basicPathPlugin.apply(map);
-basicPathPlugin.enableClickDrawing(map);
+const edwardPlugin = createEdwardPlugin();
+edwardPlugin.apply(map);
+edwardPlugin.enableClickDrawing(map);
 
 const controls = document.createElement('div');
 controls.className = 'map-controls';
+
+const brand = document.createElement('div');
+brand.className = 'map-brand';
+
+const brandKicker = document.createElement('div');
+brandKicker.className = 'map-brand-kicker';
+brandKicker.textContent = 'Plugin';
+
+const brandTitle = document.createElement('div');
+brandTitle.className = 'map-brand-title';
+brandTitle.textContent = 'Edward';
 
 const instructions = document.createElement('div');
 instructions.className = 'map-instructions';
@@ -44,26 +55,26 @@ simplificationLabelText.textContent = 'Simplification';
 const simplificationSelect = document.createElement('select');
 simplificationSelect.className = 'map-select';
 simplificationSelect.addEventListener('change', () => {
-  void basicPathPlugin.setSimplificationPreset(simplificationSelect.value);
+  void edwardPlugin.setSimplificationPreset(simplificationSelect.value);
 });
 
 const toggleButton = document.createElement('button');
 toggleButton.type = 'button';
 toggleButton.className = 'map-button';
 toggleButton.addEventListener('click', () => {
-  basicPathPlugin.setEnabled(!basicPathPlugin.isEnabled());
+  edwardPlugin.setEnabled(!edwardPlugin.isEnabled());
 });
 
 const clearButton = document.createElement('button');
 clearButton.type = 'button';
 clearButton.className = 'map-button';
 clearButton.addEventListener('click', () => {
-  basicPathPlugin.clearPoints();
+  edwardPlugin.clearPoints();
 });
 
 function updateControls(state) {
   instructions.textContent = state.status;
-  toggleButton.textContent = state.enabled ? 'Finish smart draw' : 'Start smart draw';
+  toggleButton.textContent = state.enabled ? 'Finish trace' : 'Start trace';
   toggleButton.classList.toggle('is-active', state.enabled);
   toggleButton.disabled = state.busy;
 
@@ -83,10 +94,11 @@ function updateControls(state) {
   simplificationSelect.disabled = state.busy;
 }
 
-basicPathPlugin.subscribe(updateControls);
+edwardPlugin.subscribe(updateControls);
 
+brand.append(brandKicker, brandTitle);
 simplificationLabel.append(simplificationLabelText, simplificationSelect);
 actions.append(toggleButton, clearButton);
 settings.append(simplificationLabel);
-controls.append(instructions, settings, actions);
+controls.append(brand, instructions, settings, actions);
 document.body.append(controls);

@@ -115,7 +115,7 @@ function imageDataToTransferableSnapshot(imageData) {
   };
 }
 
-export function createBasicPathPlugin(options = {}) {
+export function createEdwardPlugin(options = {}) {
   const strokeColor = options.color ?? '#ff5a36';
   const fillColor = options.fillColor ?? 'rgba(255, 90, 54, 0.18)';
   const committedFillColor = options.committedFillColor ?? 'rgba(255, 90, 54, 0.22)';
@@ -195,7 +195,7 @@ export function createBasicPathPlugin(options = {}) {
   let liveSegment = [];
   let completedPolygons = [];
   let busy = false;
-  let status = 'Enable smart draw to start tracing paths.';
+  let status = 'Edward is ready. Start a trace to follow map contours.';
   let imageReady = false;
   let previewInFlight = false;
   let previewPixel;
@@ -599,7 +599,7 @@ export function createBasicPathPlugin(options = {}) {
     void runPreviewLoop();
   }
 
-  function resetSession(nextStatus = 'Enable smart draw to start tracing paths.') {
+  function resetSession(nextStatus = 'Edward is ready. Start a trace to follow map contours.') {
     clearSketchState();
     completedPolygons = [];
     setStatus(nextStatus, false);
@@ -617,7 +617,7 @@ export function createBasicPathPlugin(options = {}) {
   }
 
   return {
-    id: 'basic-path-plugin',
+    id: 'edward',
     layer: pathLayer,
     feature: pathFeature,
     subscribe(listener) {
@@ -652,7 +652,7 @@ export function createBasicPathPlugin(options = {}) {
         setStatus(
           completedPolygons.length > 0
             ? 'Current path discarded. Click to start another smart path, or toggle the tool off to commit.'
-            : 'Current path discarded. Click the map to place the first magnetic anchor.',
+            : 'Current trace discarded. Click the map to place the first anchor.',
           false
         );
         syncPathGeometry();
@@ -664,7 +664,7 @@ export function createBasicPathPlugin(options = {}) {
         setStatus(
           completedPolygons.length > 0
             ? 'Last stored path removed.'
-            : 'Last stored path removed. Click the map to place the first magnetic anchor.',
+            : 'Last stored trace removed. Click the map to place the first anchor.',
           false
         );
         syncPathGeometry();
@@ -694,7 +694,7 @@ export function createBasicPathPlugin(options = {}) {
             void runPreviewLoop();
           }
         } else if (enabled) {
-          setStatus('Simplification updated. Click the map to place the first magnetic anchor.', false);
+          setStatus('Simplification updated. Click the map to place the first anchor.', false);
         }
       } catch (error) {
         console.error('Updating simplification preset failed:', error);
@@ -712,7 +712,7 @@ export function createBasicPathPlugin(options = {}) {
       enabled = nextEnabled;
 
       if (enabled) {
-        resetSession('Smart draw enabled. Click the map to place the first magnetic anchor.');
+        resetSession('Edward tracing enabled. Click the map to place the first anchor.');
         notify();
         return enabled;
       }
@@ -720,8 +720,8 @@ export function createBasicPathPlugin(options = {}) {
       const committed = commitCompletedPaths();
       resetSession(
         committed
-          ? 'Smart draw disabled. MultiPolygon committed to the map.'
-          : 'Smart draw disabled.'
+          ? 'Edward tracing disabled. MultiPolygon committed to the map.'
+          : 'Edward tracing disabled.'
       );
       return enabled;
     },
@@ -755,7 +755,7 @@ export function createBasicPathPlugin(options = {}) {
       unByKey(clickKey);
       unByKey(moveKey);
       unByKey(moveEndKey);
-      pendingRequests.forEach(({reject}) => reject(new Error('Plugin destroyed.')));
+      pendingRequests.forEach(({reject}) => reject(new Error('Edward plugin destroyed.')));
       pendingRequests.clear();
       worker?.terminate();
       worker = undefined;

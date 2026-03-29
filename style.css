@@ -21,6 +21,28 @@ html, body {
   gap: 10px;
 }
 
+.map-brand {
+  min-width: 160px;
+  padding: 12px 14px;
+  background: rgba(255, 248, 244, 0.95);
+  border: 1px solid rgba(185, 68, 33, 0.18);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(65, 38, 26, 0.08);
+}
+
+.map-brand-kicker {
+  font: 11px/1.2 sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(122, 44, 20, 0.72);
+}
+
+.map-brand-title {
+  margin-top: 4px;
+  font: 700 20px/1.1 sans-serif;
+  color: #7a2c14;
+}
+
 .map-instructions {
   padding: 10px 12px;
   background: rgba(255, 255, 255, 0.92);
