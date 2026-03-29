@@ -114,6 +114,22 @@ function imageDataToTransferableSnapshot(imageData) {
   };
 }
 
+function createDefaultWorker() {
+  return new Worker(new URL('./contour-detection-worker.js', import.meta.url), {
+    type: 'module'
+  });
+}
+
+/**
+ * @typedef {object} EdwardOptions
+ * @property {VectorSource} [outputSource]
+ * @property {string | URL} [workerUrl]
+ * @property {() => Worker} [createWorker]
+ */
+
+/**
+ * @param {EdwardOptions & Record<string, any>} [options]
+ */
 export function createEdwardPlugin(options = {}) {
   const strokeColor = options.color ?? '#ff5a36';
   const fillColor = options.fillColor ?? 'rgba(255, 90, 54, 0.18)';
@@ -302,14 +318,26 @@ export function createEdwardPlugin(options = {}) {
     notify();
   }
 
+  function resolveWorker() {
+    if (typeof options.createWorker === 'function') {
+      return options.createWorker();
+    }
+
+    if (options.workerUrl) {
+      return new Worker(options.workerUrl, {
+        type: 'module'
+      });
+    }
+
+    return createDefaultWorker();
+  }
+
   function createWorkerIfNeeded() {
     if (worker) {
       return worker;
     }
 
-    worker = new Worker(new URL('./contour-detection-worker.js', import.meta.url), {
-      type: 'module'
-    });
+    worker = resolveWorker();
     worker.addEventListener('message', (event) => {
       const {id, ok, result, error} = event.data;
       const pending = pendingRequests.get(id);

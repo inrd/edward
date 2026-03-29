@@ -1,6 +1,6 @@
 {
   "name": "edward-ol",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Contour-aware path tracing for OpenLayers maps.",
   "keywords": [
     "openlayers",

@@ -48,6 +48,32 @@ edward.apply(map);
 edward.enableClickDrawing(map);
 ```
 
+If your app needs to control how the contour worker is created, Edward supports two optional overrides:
+
+- `createWorker`: fully custom worker construction
+- `workerUrl`: provide a module worker URL while keeping Edward's default worker options
+
+Edward resolves them in this order: `createWorker`, then `workerUrl`, then the bundled internal worker.
+
+```js
+const edward = createEdwardPlugin({
+  outputSource,
+  workerUrl: new URL('./workers/contour-detection-worker.js', import.meta.url)
+});
+```
+
+```js
+const edward = createEdwardPlugin({
+  outputSource,
+  createWorker: () =>
+    new Worker(new URL('./workers/contour-detection-worker.js', import.meta.url), {
+      type: 'module'
+    })
+});
+```
+
+Use one of these overrides if your host app needs to guarantee same-origin worker delivery behind a proxy, split dev-server setup, or other non-default asset topology.
+
 ## Add UI controls
 
 Edward does not render controls for you. The host application is expected to provide its own buttons, selects, and status display, then connect them to the plugin API.
