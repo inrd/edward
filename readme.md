@@ -1,6 +1,7 @@
 # Edward
 
 Edward is a contour-aware tracing plugin for OpenLayers. It captures the rendered map, extracts image gradients in a worker, and snaps interactive path tracing to visible contours.
+It was inspired by wanting an OpenLayers equivalent to Annotorious's magnetic outline plugin: https://github.com/annotorious/plugin-magnetic-outline
 
 ## Install
 
