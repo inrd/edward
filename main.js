@@ -47,23 +47,14 @@ clearButton.addEventListener('click', () => {
   basicPathPlugin.clearPoints();
 });
 
-const closeButton = document.createElement('button');
-closeButton.type = 'button';
-closeButton.className = 'map-button';
-closeButton.addEventListener('click', async () => {
-  await basicPathPlugin.toggleClosed();
-});
-
 function updateControls(state) {
   instructions.textContent = state.status;
-  closeButton.disabled = state.busy || (!state.canClose && !state.closed);
-  closeButton.textContent = state.closed ? 'Reopen path' : 'Close path';
   undoButton.disabled = state.busy || state.pointCount === 0;
   clearButton.disabled = state.busy || !state.hasPath;
 }
 
 basicPathPlugin.subscribe(updateControls);
 
-actions.append(undoButton, clearButton, closeButton);
+actions.append(undoButton, clearButton);
 controls.append(instructions, actions);
 document.body.append(controls);

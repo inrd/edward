@@ -413,7 +413,7 @@ export function createBasicPathPlugin(options = {}) {
 
     if (targetPixel === anchorPixels[0]) {
       closed = true;
-      setStatus('Path closed. Reopen it or clear it to keep editing.', false);
+      setStatus('Path closed. Undo the last point or clear it to keep editing.', false);
       syncPathGeometry();
       return true;
     }
@@ -444,7 +444,7 @@ export function createBasicPathPlugin(options = {}) {
     }
 
     if (closed) {
-      setStatus('The path is closed. Reopen it or clear it before adding more anchors.', false);
+      setStatus('The path is closed. Undo the last point or clear it before adding more anchors.', false);
       return;
     }
 
