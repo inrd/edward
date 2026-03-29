@@ -31,6 +31,22 @@ instructions.className = 'map-instructions';
 const actions = document.createElement('div');
 actions.className = 'map-actions';
 
+const settings = document.createElement('div');
+settings.className = 'map-settings';
+
+const simplificationLabel = document.createElement('label');
+simplificationLabel.className = 'map-field';
+
+const simplificationLabelText = document.createElement('span');
+simplificationLabelText.className = 'map-field-label';
+simplificationLabelText.textContent = 'Simplification';
+
+const simplificationSelect = document.createElement('select');
+simplificationSelect.className = 'map-select';
+simplificationSelect.addEventListener('change', () => {
+  void basicPathPlugin.setSimplificationPreset(simplificationSelect.value);
+});
+
 const toggleButton = document.createElement('button');
 toggleButton.type = 'button';
 toggleButton.className = 'map-button';
@@ -53,10 +69,24 @@ function updateControls(state) {
 
   clearButton.textContent = state.pointCount > 0 ? 'Discard current path' : 'Undo last path';
   clearButton.disabled = state.busy || !state.canUndo;
+
+  if (simplificationSelect.options.length === 0) {
+    for (const preset of state.simplificationPresets) {
+      const option = document.createElement('option');
+      option.value = preset;
+      option.textContent = preset[0].toUpperCase() + preset.slice(1);
+      simplificationSelect.append(option);
+    }
+  }
+
+  simplificationSelect.value = state.activeSimplificationPreset;
+  simplificationSelect.disabled = state.busy;
 }
 
 basicPathPlugin.subscribe(updateControls);
 
+simplificationLabel.append(simplificationLabelText, simplificationSelect);
 actions.append(toggleButton, clearButton);
-controls.append(instructions, actions);
+settings.append(simplificationLabel);
+controls.append(instructions, settings, actions);
 document.body.append(controls);

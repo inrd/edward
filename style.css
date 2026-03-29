@@ -34,6 +34,39 @@ html, body {
   gap: 8px;
 }
 
+.map-settings {
+  display: flex;
+}
+
+.map-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 160px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+}
+
+.map-field-label {
+  font: 12px/1.2 sans-serif;
+  color: rgba(0, 0, 0, 0.66);
+}
+
+.map-select {
+  appearance: none;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  padding: 8px 10px;
+  font: 14px/1.2 sans-serif;
+}
+
+.map-select:disabled {
+  opacity: 0.55;
+}
+
 .map-button {
   appearance: none;
   border: 1px solid rgba(0, 0, 0, 0.14);

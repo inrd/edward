@@ -6,7 +6,10 @@ let settings = {
   lineBias: 1.35,
   turnBias: 1.1,
   continuityBias: 1.35,
-  guideBias: 0.3
+  guideBias: 0.3,
+  simplifyTolerance: 1.15,
+  simplifyMaxDeviation: 2.4,
+  simplifyGradientBias: 0.4
 };
 
 let model;
@@ -281,7 +284,7 @@ function reconstructPath(parent, goalIndex) {
   return path;
 }
 
-function simplifyPath(points) {
+function removeLowValuePoints(points) {
   let nextPoints = points;
   let changed = nextPoints.length >= 3;
 
@@ -322,9 +325,87 @@ function simplifyPath(points) {
     nextPoints = simplified;
   }
 
+  return nextPoints;
+}
+
+function getMaxSegmentDeviation(points, startIndex, endIndex) {
+  const start = points[startIndex];
+  const end = points[endIndex];
+  let maxDeviation = 0;
+
+  for (let index = startIndex + 1; index < endIndex; index += 1) {
+    const point = points[index];
+    const deviation = pointToSegmentDistance(point[0], point[1], start, end);
+    if (deviation > maxDeviation) {
+      maxDeviation = deviation;
+    }
+  }
+
+  return maxDeviation;
+}
+
+function simplifyPath(points) {
+  if (points.length <= 2) {
+    return points.map(gridToPixel);
+  }
+
+  const cleanedPoints = removeLowValuePoints(points);
+  if (cleanedPoints.length <= 2) {
+    return cleanedPoints.map(gridToPixel);
+  }
+
+  const keep = new Uint8Array(cleanedPoints.length);
+  const stack = [[0, cleanedPoints.length - 1]];
+  keep[0] = 1;
+  keep[cleanedPoints.length - 1] = 1;
+
+  while (stack.length > 0) {
+    const [startIndex, endIndex] = stack.pop();
+    if (endIndex - startIndex < 2) {
+      continue;
+    }
+
+    const start = cleanedPoints[startIndex];
+    const end = cleanedPoints[endIndex];
+    let splitIndex = -1;
+    let maxScore = -1;
+    let maxDeviation = 0;
+
+    for (let index = startIndex + 1; index < endIndex; index += 1) {
+      const point = cleanedPoints[index];
+      const deviation = pointToSegmentDistance(point[0], point[1], start, end);
+      const gradientBias = gradientAt(point[0], point[1]) * settings.simplifyGradientBias;
+      const score = deviation + gradientBias;
+
+      if (score > maxScore) {
+        splitIndex = index;
+        maxScore = score;
+        maxDeviation = deviation;
+      }
+    }
+
+    if (splitIndex === -1) {
+      continue;
+    }
+
+    if (maxScore > settings.simplifyTolerance) {
+      keep[splitIndex] = 1;
+      stack.push([startIndex, splitIndex], [splitIndex, endIndex]);
+      continue;
+    }
+
+    const segmentDeviation = getMaxSegmentDeviation(cleanedPoints, startIndex, endIndex);
+    if (segmentDeviation > settings.simplifyMaxDeviation) {
+      keep[splitIndex] = 1;
+      stack.push([startIndex, splitIndex], [splitIndex, endIndex]);
+    }
+  }
+
   const path = [];
-  for (const point of nextPoints) {
-    path.push(gridToPixel(point));
+  for (let index = 0; index < cleanedPoints.length; index += 1) {
+    if (keep[index]) {
+      path.push(gridToPixel(cleanedPoints[index]));
+    }
   }
 
   return path;

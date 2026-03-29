@@ -9,6 +9,23 @@ import {unByKey} from 'ol/Observable';
 import {Circle as CircleStyle, Fill, Stroke, Style} from 'ol/style';
 
 const WORKER_URL = '/contour-detection-worker.js';
+const SIMPLIFICATION_PRESETS = {
+  low: {
+    simplifyTolerance: 0.85,
+    simplifyMaxDeviation: 1.75,
+    simplifyGradientBias: 0.5
+  },
+  mid: {
+    simplifyTolerance: 1.15,
+    simplifyMaxDeviation: 2.4,
+    simplifyGradientBias: 0.4
+  },
+  high: {
+    simplifyTolerance: 1.55,
+    simplifyMaxDeviation: 3.2,
+    simplifyGradientBias: 0.3
+  }
+};
 
 function pixelsClose(a, b, threshold = 14) {
   return Math.hypot(a[0] - b[0], a[1] - b[1]) <= threshold;
@@ -184,6 +201,25 @@ export function createBasicPathPlugin(options = {}) {
   let previewPixel;
   let previewToken = 0;
   let destroyed = false;
+  let activeSimplificationPreset = SIMPLIFICATION_PRESETS[options.simplificationPreset] ? options.simplificationPreset : 'low';
+
+  function getSimplificationOptions() {
+    return SIMPLIFICATION_PRESETS[activeSimplificationPreset];
+  }
+
+  function getWorkerOptions() {
+    return {
+      gridStep: options.gridStep ?? 2,
+      searchPadding: options.searchPadding ?? 52,
+      maxSearchPadding: options.maxSearchPadding ?? 136,
+      edgeBias: options.edgeBias ?? 8,
+      lineBias: options.lineBias ?? 1.35,
+      turnBias: options.turnBias ?? 1.1,
+      continuityBias: options.continuityBias ?? 1.35,
+      guideBias: options.guideBias ?? 0.3,
+      ...getSimplificationOptions()
+    };
+  }
 
   function getCurrentPathCoordinates() {
     return mergeSegments(segments, liveSegment);
@@ -202,7 +238,9 @@ export function createBasicPathPlugin(options = {}) {
       hasPath: completedPolygons.length > 0 || getCurrentPathCoordinates().length > 0,
       canUndo: completedPolygons.length > 0 || hasActiveSketch(),
       completedPathCount: completedPolygons.length,
-      status
+      status,
+      activeSimplificationPreset,
+      simplificationPresets: Object.keys(SIMPLIFICATION_PRESETS)
     };
   }
 
@@ -313,16 +351,14 @@ export function createBasicPathPlugin(options = {}) {
     }
 
     await callWorker('init', {
-      options: {
-        gridStep: options.gridStep ?? 2,
-        searchPadding: options.searchPadding ?? 52,
-        maxSearchPadding: options.maxSearchPadding ?? 136,
-        edgeBias: options.edgeBias ?? 8,
-        lineBias: options.lineBias ?? 1.35,
-        turnBias: options.turnBias ?? 1.1,
-        continuityBias: options.continuityBias ?? 1.35,
-        guideBias: options.guideBias ?? 0.3
-      }
+      options: getWorkerOptions()
+    });
+    workerReady = true;
+  }
+
+  async function updateWorkerSettings() {
+    await callWorker('init', {
+      options: getWorkerOptions()
     });
     workerReady = true;
   }
@@ -636,6 +672,37 @@ export function createBasicPathPlugin(options = {}) {
       }
 
       return false;
+    },
+    getSimplificationPreset() {
+      return activeSimplificationPreset;
+    },
+    async setSimplificationPreset(nextPreset) {
+      if (!SIMPLIFICATION_PRESETS[nextPreset] || nextPreset === activeSimplificationPreset || busy) {
+        return activeSimplificationPreset;
+      }
+
+      activeSimplificationPreset = nextPreset;
+      notify();
+
+      try {
+        await ensureWorkerReady();
+        await updateWorkerSettings();
+
+        if (enabled && anchors.length > 0) {
+          await refreshMagneticModel();
+          if (previewPixel) {
+            void runPreviewLoop();
+          }
+        } else if (enabled) {
+          setStatus('Simplification updated. Click the map to place the first magnetic anchor.', false);
+        }
+      } catch (error) {
+        console.error('Updating simplification preset failed:', error);
+        setStatus(`Updating simplification failed: ${error.message}`, false);
+      }
+
+      notify();
+      return activeSimplificationPreset;
     },
     setEnabled(nextEnabled) {
       if (busy || enabled === nextEnabled) {
