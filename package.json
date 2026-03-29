@@ -1,7 +1,26 @@
 {
-  "name": "edward",
+  "name": "edward-ol",
   "version": "1.0.0",
   "description": "Contour-aware path tracing for OpenLayers maps.",
+  "keywords": [
+    "openlayers",
+    "ol",
+    "map",
+    "gis",
+    "tracing",
+    "contour",
+    "polygon"
+  ],
+  "homepage": "https://github.com/inrd/edward#readme",
+  "bugs": {
+    "url": "https://github.com/inrd/edward/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inrd/edward.git"
+  },
+  "license": "MIT",
+  "author": "Thomas Hennebert",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -9,7 +28,9 @@
     ".": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "readme.md",
+    "LICENSE"
   ],
   "scripts": {
     "start": "vite",

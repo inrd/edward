@@ -5,7 +5,7 @@ Edward is a contour-aware tracing plugin for OpenLayers. It captures the rendere
 ## Install
 
 ```bash
-npm install edward ol
+npm install edward-ol ol
 ```
 
 ## Integrate with OpenLayers
@@ -14,7 +14,7 @@ npm install edward ol
 import {Map, View} from 'ol';
 import TileLayer from 'ol/layer/Tile';
 import OSM from 'ol/source/OSM';
-import {createEdwardPlugin} from 'edward';
+import {createEdwardPlugin} from 'edward-ol';
 
 const map = new Map({
   target: 'map',
